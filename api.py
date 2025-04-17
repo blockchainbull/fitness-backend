@@ -1,39 +1,45 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
-import os
 from dotenv import load_dotenv
-from motor.motor_asyncio import AsyncIOMotorClient
 from collections import defaultdict
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, select
+import datetime
+import os
+import re
 import agentops
 from agents import Agent, Runner, WebSearchTool
 from openai import OpenAI
 from fastapi.middleware.cors import CORSMiddleware
 from markupsafe import escape
-import re
 
 # Load environment variables
 load_dotenv()
 
-# Get API keys and MongoDB URI
+# Database and API config
+DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AGENTOPS_API_KEY = os.getenv("AGENTOPS_API_KEY")
-MONGO_URI = "mongodb+srv://bulli007:123456ABCDEF@cluster0.mvxqc.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-MONGO_DB_NAME = "ai_coach"
 
-# Initialize MongoDB
-client = AsyncIOMotorClient(MONGO_URI)
-db = client[MONGO_DB_NAME]
-sessions_collection = db["conversation"]
-
-# Initialize AgentOps and OpenAI
+# Initialize tools and clients
 agentops.init(AGENTOPS_API_KEY)
 client_openai = OpenAI()
 web_search = WebSearchTool()
 
-# In-memory session context
-session_memory = defaultdict(list)
-MAX_HISTORY = 10
+# SQLAlchemy setup
+Base = declarative_base()
+engine = create_async_engine(DATABASE_URL, echo=True)
+SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String, index=True)
+    role = Column(String)
+    content = Column(Text)
+    created_at = Column(TIMESTAMP, default=datetime.datetime.utcnow)
 
 # HTML formatter
 def format_response_as_html(text: str) -> str:
@@ -45,7 +51,9 @@ def format_response_as_html(text: str) -> str:
     for line in lines:
         stripped = line.strip()
 
-        # Headings
+        if stripped.startswith("**") and stripped.endswith("**"):
+            stripped = stripped[2:-2].strip()
+
         if stripped.startswith("### "):
             html.append(f"<h3>{escape(stripped[4:])}</h3>")
         elif stripped.startswith("## "):
@@ -53,14 +61,12 @@ def format_response_as_html(text: str) -> str:
         elif stripped.startswith("# "):
             html.append(f"<h1>{escape(stripped[2:])}</h1>")
 
-        # Unordered list (handle multiple list items starting with -)
         elif stripped.startswith("- "):
             if not in_ul:
                 html.append("<ul>")
                 in_ul = True
             html.append(f"<li>{escape(stripped[2:])}</li>")
 
-        # Ordered list
         elif re.match(r"^\d+\.\s", stripped):
             if not in_ol:
                 html.append("<ol>")
@@ -68,12 +74,10 @@ def format_response_as_html(text: str) -> str:
             item = re.sub(r"^\d+\.\s", "", stripped)
             html.append(f"<li>{escape(item)}</li>")
 
-        # Key: Value pairs
         elif ":" in stripped and not stripped.startswith("http"):
             key, value = stripped.split(":", 1)
             html.append(f"<p><strong>{escape(key.strip())}:</strong> {escape(value.strip())}</p>")
 
-        # Empty line (convert to <br>)
         elif not stripped:
             if in_ul:
                 html.append("</ul>")
@@ -83,11 +87,9 @@ def format_response_as_html(text: str) -> str:
                 in_ol = False
             html.append("<br>")
 
-        # Plain paragraph
         else:
             html.append(f"<p>{escape(stripped)}</p>")
 
-    # Close any open lists
     if in_ul:
         html.append("</ul>")
     if in_ol:
@@ -95,129 +97,23 @@ def format_response_as_html(text: str) -> str:
 
     return "\n".join(html)
 
-# Request model for API endpoint
-class PromptRequest(BaseModel):
-    session_id: str
-    user_prompt: str
-    agent_name: str
-
-# MongoDB Functions
-async def get_session_conversation(session_id: str):
-    session = await sessions_collection.find_one({"session_id": session_id})
-    if session:
-        return session["conversation"]
-    return []
-
-async def update_session_conversation(session_id: str, conversation: list):
-    await sessions_collection.update_one(
-        {"session_id": session_id},
-        {"$set": {"conversation": conversation}},
-        upsert=True
-    )
-
-async def append_to_session_conversation(session_id: str, user_message: str, agent_message: str):
-    session_conversation = await get_session_conversation(session_id)
-    session_conversation.append(f"User: {user_message}")
-    session_conversation.append(f"Agent: {agent_message}")
-
-    # Limit the conversation length (e.g., last 20 messages)
-    if len(session_conversation) > 40:  # 2 messages per interaction
-        session_conversation = session_conversation[-40:]
-
-    await update_session_conversation(session_id, session_conversation)
-
-# Response models for structured outputs
-class NutritionInfo(BaseModel):
-    foods: List[str] = Field(..., description="List of foods identified in the meal")
-    total_calories: Optional[int] = Field(None, description="Estimated total calories")
-    recommendations: Optional[List[str]] = Field(None, description="Nutritional recommendations")
-
-class WorkoutPlan(BaseModel):
-    exercises: List[str] = Field(..., description="List of recommended exercises")
-    duration: str = Field(..., description="Recommended workout duration")
-    intensity: str = Field(..., description="Recommended intensity level")
-
-class BMIResult(BaseModel):
-    bmi: Optional[float] = Field(None, description="Calculated BMI value")
-    category: Optional[str] = Field(None, description="BMI category")
-    advice: Optional[str] = Field(None, description="Health advice based on BMI")
-
-class SleepRecommendation(BaseModel):
-    bedtime: Optional[str] = Field(None, description="Recommended bedtime")
-    tips: Optional[List[str]] = Field(None, description="Sleep hygiene tips")
-
-# Define agents
-nutrition_agent = Agent(
-    name="nutrition_agent",
-    instructions="""You are a nutrition specialist.
-    When asked about food or meals, use the web_search tool to find nutritional information.
-    Return the information in a clear, structured format.
-    Always include:
-    - Identified foods
-    - Estimated calories (when possible)
-    - Nutritional recommendations
+# Agent setup
+nutrition_and_fitness_coach = Agent(
+    name="nutrition_and_fitness_coach",
+    instructions="""You are an empathetic Nutritionist and Exercise Science AI.
+    Your communication is friendly, concise, and professional.
+    Prioritize asking questions to gather critical information before offering advice.
+    Keep responses under 2-3 sentences unless the user requests details.
     """,
     tools=[web_search]
 )
 
-workout_agent = Agent(
-    name="workout_agent",
-    instructions="""You are a fitness trainer.
-    When asked about workouts or exercises, use the web_search tool to find appropriate workout plans.
-    Consider the user's fitness level, available equipment, and goals.
-    Always include:
-    - List of recommended exercises
-    - Recommended duration
-    - Intensity level
-    """,
-    tools=[web_search]
-)
-
-bmi_agent = Agent(
-    name="bmi_agent",
-    instructions="""You are a BMI calculator and advisor.
-    Calculate BMI using the formula: weight(kg) / height(m)².
-    Provide the BMI category and appropriate health advice.
-    Use web_search to find additional information if needed.
-    """,
-    tools=[web_search]
-)
-
-sleep_agent = Agent(
-    name="sleep_agent",
-    instructions="""You are a sleep specialist.
-    Provide sleep recommendations based on the user's wake-up time and sleep needs.
-    Use web_search to find sleep hygiene tips and other relevant information.
-    """,
-    tools=[web_search]
-)
-
-health_coach = Agent(
-    name="health_coach",
-    instructions="""You are a helpful health and wellness coach.
-    Your job is to help users improve their physical health, nutrition, sleep, and overall wellness.
-    For nutrition questions, hand off to the nutrition_agent.
-    For workout questions, hand off to the workout_agent.
-    For BMI calculations, hand off to the bmi_agent.
-    For sleep recommendations, hand off to the sleep_agent.
-    """,
-    tools=[web_search],
-    handoffs=[nutrition_agent, workout_agent, bmi_agent, sleep_agent]
-)
-
-# Map agent name to instance
 AGENTS = {
-    "health_coach": health_coach,
-    "nutrition_agent": nutrition_agent,
-    "workout_agent": workout_agent,
-    "bmi_agent": bmi_agent,
-    "sleep_agent": sleep_agent,
+    "nutrition_and_fitness_coach": nutrition_and_fitness_coach,
 }
 
-# FastAPI app initialization
+# FastAPI app
 app = FastAPI()
-
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -226,67 +122,111 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Run the agent and manage session memory
-async def get_agent_response(session_id: str, agent: Agent, user_prompt: str) -> str:
-    # Retrieve session conversation from MongoDB
-    session_conversation = await get_session_conversation(session_id)
+# Request & Response Models
+class PromptRequest(BaseModel):
+    session_id: str
+    user_prompt: str
+    agent_name: str
+
+# DB functions - FIXED
+async def get_session_conversation(session_id: str):
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(ChatMessage.role, ChatMessage.content, ChatMessage.created_at)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at)
+        )
+        return result.all()
+
+# FIXED to properly handle timestamps
+async def append_to_session_conversation(session_id: str, user_message: str, agent_message: str):
+    now = datetime.datetime.utcnow()
     
-    # Build full conversation context
-    conversation = "\n".join(session_conversation) + f"\nUser: {user_prompt}"
+    async with SessionLocal() as session:
+        # Add both user message and agent response with same timestamp
+        session.add_all([
+            ChatMessage(
+                session_id=session_id, 
+                role="user", 
+                content=user_message,
+                created_at=now
+            ),
+            ChatMessage(
+                session_id=session_id, 
+                role="assistant", 
+                content=agent_message,
+                created_at=now + datetime.timedelta(milliseconds=1)  # Ensure order is maintained
+            ),
+        ])
+        await session.commit()
+
+# Core logic - FIXED to handle PostgreSQL conversation format
+async def get_agent_response(session_id: str, agent: Agent, user_prompt: str) -> str:
+    # Retrieve conversation from PostgreSQL
+    messages = await get_session_conversation(session_id)
+    
+    # Format conversation for the agent - now handling the (role, content, timestamp) tuples correctly
+    history = "\n".join([f"{role.capitalize()}: {content}" for role, content, _ in messages])
+    
+    # Add the current user message
+    conversation = history + (f"\nUser: {user_prompt}" if history else f"User: {user_prompt}")
     
     # Run the agent
     result = await Runner.run(agent, conversation)
-    raw_response = result.final_output
+    response = result.final_output
+    
+    # Format response as HTML
+    html = format_response_as_html(response)
+    
+    # Store both user input and agent response
+    await append_to_session_conversation(session_id, user_prompt, html)
+    
+    return html
 
-    # Append user message and raw (not HTML) agent response to the DB
-    await append_to_session_conversation(session_id, user_prompt, raw_response)
-
-    # Format agent response to HTML for frontend use
-    html_response = format_response_as_html(raw_response)
-    print(html_response)
-    return html_response
-
-# API endpoint to handle user input
+# Routes
 @app.post("/submit-prompt")
 async def submit_prompt(data: PromptRequest):
     agent = AGENTS.get(data.agent_name)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found.")
-
     try:
         response = await get_agent_response(data.session_id, agent, data.user_prompt)
         return {"response": response}
     except Exception as e:
-        # Log the error with more details for debugging
-        print(f"Error occurred while processing prompt: {e}")
+        print(f"Error occurred while processing prompt: {e}")  # Add logging for debugging
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-
-# New endpoint to retrieve previous chat history
+# FIXED to match the MongoDB return format expected by frontend
 @app.get("/get-conversation/{session_id}")
 async def get_conversation(session_id: str):
     try:
-        # Retrieve session conversation from MongoDB
-        session_conversation = await get_session_conversation(session_id)
-        if not session_conversation:
-            return {"message": "No previous conversation found."}
-
-        # Return the conversation in the proper format
+        # Retrieve session conversation from PostgreSQL
+        messages = await get_session_conversation(session_id)
+        
+        # Format the messages in the same structure as the MongoDB version expected
         conversation = []
-        for i in range(0, len(session_conversation), 2):
-            user_message = session_conversation[i]
-            agent_message = session_conversation[i + 1] if i + 1 < len(session_conversation) else ''
+        for role, content, created_at in messages:
+            # Format timestamp to match your frontend expectations
+            timestamp = created_at.isoformat() if created_at else ""
+            
             conversation.append({
-                "role": "user",
-                "content": user_message.split(": ", 1)[1] if user_message else "",
-                "timestamp": user_message.split(" - ", 1)[0] if user_message else ""
-            })
-            conversation.append({
-                "role": "assistant",
-                "content": agent_message.split(": ", 1)[1] if agent_message else "",
-                "timestamp": agent_message.split(" - ", 1)[0] if agent_message else ""
+                "role": role,
+                "content": content,
+                "timestamp": timestamp
             })
 
         return {"conversation": conversation}
     except Exception as e:
+        print(f"Error retrieving conversation: {e}")  # Add logging for debugging
         raise HTTPException(status_code=500, detail=f"Error retrieving conversation: {str(e)}")
+
+# Add a startup event to create tables if they don't exist
+@app.on_event("startup")
+async def startup():
+    try:
+        # Create a connection and the database tables
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        print("Database tables created successfully")
+    except Exception as e:
+        print(f"Error during startup: {e}")
