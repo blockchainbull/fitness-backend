@@ -1,20 +1,22 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel
+from typing import List
 from dotenv import load_dotenv
-from collections import defaultdict
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, String, Text, TIMESTAMP, select
+from sqlalchemy import Column, Integer, String, select, update
+from sqlalchemy.dialects.postgresql import JSONB  # Correct import for JSONB
 import datetime
 import os
+import asyncio
+import traceback
 import re
-import agentops
-from agents import Agent, Runner, WebSearchTool
+from any_agent import AgentConfig, AnyAgent  # Updated import for any-agent
+from any_agent.tools import search_web, visit_webpage  # Example tools to use
+from any_agent.tracing import setup_tracing  # Optional, but recommended for tracing
 from openai import OpenAI
 from fastapi.middleware.cors import CORSMiddleware
 from markupsafe import escape
-
 # Load environment variables
 load_dotenv()
 
@@ -23,23 +25,16 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AGENTOPS_API_KEY = os.getenv("AGENTOPS_API_KEY")
 
-# Initialize tools and clients
-agentops.init(AGENTOPS_API_KEY)
-client_openai = OpenAI()
-web_search = WebSearchTool()
-
 # SQLAlchemy setup
 Base = declarative_base()
 engine = create_async_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-class ChatMessage(Base):
-    __tablename__ = "chat_messages"
+class Conversation(Base):
+    __tablename__ = "Conversation"
     id = Column(Integer, primary_key=True, index=True)
-    session_id = Column(String, index=True)
-    role = Column(String)
-    content = Column(Text)
-    created_at = Column(TIMESTAMP, default=datetime.datetime.utcnow)
+    userId = Column(String, index=True)
+    conversation = Column(JSONB)  # This will store an array of JSONB objects
 
 # HTML formatter
 def format_response_as_html(text: str) -> str:
@@ -97,21 +92,6 @@ def format_response_as_html(text: str) -> str:
 
     return "\n".join(html)
 
-# Agent setup
-nutrition_and_fitness_coach = Agent(
-    name="nutrition_and_fitness_coach",
-    instructions="""You are an empathetic Nutritionist and Exercise Science AI.
-    Your communication is friendly, concise, and professional.
-    Prioritize asking questions to gather critical information before offering advice.
-    Keep responses under 2-3 sentences unless the user requests details.
-    """,
-    tools=[web_search]
-)
-
-AGENTS = {
-    "nutrition_and_fitness_coach": nutrition_and_fitness_coach,
-}
-
 # FastAPI app
 app = FastAPI()
 app.add_middleware(
@@ -124,109 +104,147 @@ app.add_middleware(
 
 # Request & Response Models
 class PromptRequest(BaseModel):
-    session_id: str
+    user_id: str
     user_prompt: str
     agent_name: str
 
-# DB functions - FIXED
-async def get_session_conversation(session_id: str):
-    async with SessionLocal() as session:
-        result = await session.execute(
-            select(ChatMessage.role, ChatMessage.content, ChatMessage.created_at)
-            .where(ChatMessage.session_id == session_id)
-            .order_by(ChatMessage.created_at)
-        )
-        return result.all()
-
-# FIXED to properly handle timestamps
-async def append_to_session_conversation(session_id: str, user_message: str, agent_message: str):
-    now = datetime.datetime.utcnow()
+# DB functions
+async def get_user_conversation(user_id: str):
     
     async with SessionLocal() as session:
-        # Add both user message and agent response with same timestamp
-        session.add_all([
-            ChatMessage(
-                session_id=session_id, 
-                role="user", 
-                content=user_message,
-                created_at=now
-            ),
-            ChatMessage(
-                session_id=session_id, 
-                role="assistant", 
-                content=agent_message,
-                created_at=now + datetime.timedelta(milliseconds=1)  # Ensure order is maintained
-            ),
-        ])
+        try:
+            result = await session.execute(
+                select(Conversation.conversation).where(Conversation.userId == user_id)
+            )
+            conversation_data = result.scalar() or []
+
+            formatted_conversation = []
+            for entry in conversation_data:
+                role = entry.get("role", "unknown")
+                content = entry.get("content", "")
+                timestamp = entry.get("timestamp", "")
+                formatted_conversation.append({
+                    "role": role,
+                    "content": content,
+                    "timestamp": timestamp
+                })
+            return formatted_conversation
+        except Exception as e:
+            print(f"🔥 Error fetching user conversation: {e}")
+            raise
+
+async def append_to_user_conversation(user_id: str, user_message: str, agent_message: str):
+    now = datetime.datetime.utcnow().isoformat()  # Format timestamp in ISO 8601 format
+
+    # Create new conversation entries for the user and assistant
+    user_message_entry = {
+        "role": "user",
+        "content": user_message,
+        "timestamp": now
+    }
+    
+    agent_message_entry = {
+        "role": "assistant",
+        "content": agent_message,
+        "timestamp": now
+    }
+
+    async with SessionLocal() as session:
+        # First, retrieve the current conversation array
+        result = await session.execute(
+            select(Conversation.conversation)
+            .where(Conversation.userId == user_id)
+        )
+        conversation_data = result.scalar() or []
+
+        # Append the new user and assistant messages to the array
+        conversation_data.append(user_message_entry)
+        conversation_data.append(agent_message_entry)
+
+        # Update the conversation in the database
+        stmt = (
+            update(Conversation)
+            .where(Conversation.userId == user_id)
+            .values(conversation=conversation_data)
+        )
+        await session.execute(stmt)
         await session.commit()
 
-# Core logic - FIXED to handle PostgreSQL conversation format
-async def get_agent_response(session_id: str, agent: Agent, user_prompt: str) -> str:
-    # Retrieve conversation from PostgreSQL
-    messages = await get_session_conversation(session_id)
-    
-    # Format conversation for the agent - now handling the (role, content, timestamp) tuples correctly
-    history = "\n".join([f"{role.capitalize()}: {content}" for role, content, _ in messages])
-    
-    # Add the current user message
-    conversation = history + (f"\nUser: {user_prompt}" if history else f"User: {user_prompt}")
-    
-    # Run the agent
-    result = await Runner.run(agent, conversation)
-    response = result.final_output
-    
-    # Format response as HTML
-    html = format_response_as_html(response)
-    
-    # Store both user input and agent response
-    await append_to_session_conversation(session_id, user_prompt, html)
-    
-    return html
+# Core logic for handling agent response
+async def get_agent_response(user_id: str, user_prompt: str) -> str:
+    try:
+        # Retrieve conversation from PostgreSQL
+        print(f"Fetching conversation for user_id: {user_id}")
+        messages = await get_user_conversation(user_id)
+
+        print("Raw messages:", messages)
+
+        history = "\n".join([
+            f"{message.get('role', 'user').capitalize()}: {message.get('content', '')}"
+            for message in messages if isinstance(message, dict)
+        ])
+
+        conversation = history + (f"\nUser: {user_prompt}" if history else f"User: {user_prompt}")
+        print("Formatted conversation:")
+        print(conversation)
+
+        # Set up the agent
+        framework = "smolagents"
+        # setup_tracing(framework)
+        
+        instructions = """
+            You are an empathetic Nutritionist and Exercise Science AI.
+            Your communication is friendly, concise, and professional.
+            Prioritize asking questions to gather critical information before offering advice.
+            Keep responses under 2-3 sentences unless the user requests details.
+        """
+
+        # Ensure that AnyAgent.create handles async properly
+        agent = AnyAgent.create(
+            framework,
+            AgentConfig(
+                model_id="gpt-4.1-nano",
+                instructions=instructions,
+                tools=[search_web, visit_webpage]
+            )
+        )
+
+        print("Running agent...")
+
+        # If agent.run is async, simply await it
+        result = agent.run(conversation)
+
+        print("Agent response:")
+        print(result)
+
+        html = format_response_as_html(result)
+
+        await append_to_user_conversation(user_id, user_prompt, html)
+        return html
+
+    except Exception as e:
+        print(f"Error in get_agent_response for user_id={user_id}: {e}")
+        traceback.print_exc()  # <- THIS gives the full stack trace
+        return "<p>Oops! Something went wrong. Please try again later.</p>"
+
 
 # Routes
 @app.post("/submit-prompt")
 async def submit_prompt(data: PromptRequest):
-    agent = AGENTS.get(data.agent_name)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found.")
     try:
-        response = await get_agent_response(data.session_id, agent, data.user_prompt)
+        response = await get_agent_response(data.user_id, data.user_prompt)
         return {"response": response}
     except Exception as e:
-        print(f"Error occurred while processing prompt: {e}")  # Add logging for debugging
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# FIXED to match the MongoDB return format expected by frontend
-@app.get("/get-conversation/{session_id}")
-async def get_conversation(session_id: str):
+# Retrieve the conversation for the session
+@app.get("/get-conversation/{user_id}")
+async def get_conversation(user_id: str):
     try:
-        # Retrieve session conversation from PostgreSQL
-        messages = await get_session_conversation(session_id)
-        
-        # Format the messages in the same structure as the MongoDB version expected
+        messages = await get_user_conversation(user_id)
         conversation = []
-        for role, content, created_at in messages:
-            # Format timestamp to match your frontend expectations
-            timestamp = created_at.isoformat() if created_at else ""
-            
-            conversation.append({
-                "role": role,
-                "content": content,
-                "timestamp": timestamp
-            })
-
+        for content, in messages:
+            conversation.append({"content": content})
         return {"conversation": conversation}
     except Exception as e:
-        print(f"Error retrieving conversation: {e}")  # Add logging for debugging
         raise HTTPException(status_code=500, detail=f"Error retrieving conversation: {str(e)}")
-
-# Add a startup event to create tables if they don't exist
-@app.on_event("startup")
-async def startup():
-    try:
-        # Create a connection and the database tables
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        print("Database tables created successfully")
-    except Exception as e:
-        print(f"Error during startup: {e}")
