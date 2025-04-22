@@ -1,5 +1,5 @@
-from agents import Agent, Runner, function_tool
-from agents import WebSearchTool
+from agent import Agent, Runner, function_tool
+from agent import WebSearchTool
 import asyncio
 from typing import List, Dict, Optional
 from pydantic import BaseModel, Field

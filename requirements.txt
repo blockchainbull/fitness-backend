@@ -5,6 +5,8 @@ sqlalchemy==2.0.16
 sqlalchemy[asyncio]==2.0.16
 asyncpg==0.25.0
 python-dotenv==1.0.0
-any-agent==0.6.0
 openai==1.75.0
 markupsafe==2.1.2
+uuid
+# Commenting out any-agent as it's causing build issues
+# any-agent==0.6.0
