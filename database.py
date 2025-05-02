@@ -20,6 +20,22 @@ Base = declarative_base()
 engine = create_async_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+class User(Base):
+    """Database model for users."""
+    __tablename__ = "users"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False, unique=True)
+    password = Column(String, nullable=False)
+    fitnessGoal = Column(String, nullable=True)
+    dietaryPreferences = Column(ARRAY(String), nullable=True)
+    healthMetrics = Column(JSONB, nullable=True)
+    createdAt = Column(DateTime, default=datetime.datetime.utcnow)
+    updatedAt = Column(DateTime, default=datetime.datetime.utcnow)
+    physicalStats = Column(JSONB, nullable=True)
+    preferences = Column(JSONB, nullable=True)
+    version = Column(Integer, default=0)
+
 class Conversation(Base):
     """Database model for storing user conversations."""
     __tablename__ = "Conversation"
@@ -193,42 +209,56 @@ async def init_database():
     Initialize the database tables and create default users if needed.
     Called during application startup.
     """
-    # try:
-    #     # Create tables
-    #     async with engine.begin() as conn:
-    #         await conn.run_sync(Base.metadata.create_all)
+    try:
+        # Create tables
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
         
-    #     # Check if we need to initialize default conversation records
-    #     async with SessionLocal() as session:
-    #         # Helper function to add a test user if needed
-    #         async def ensure_user_exists(user_id):
-    #             result = await session.execute(
-    #                 select(Conversation).where(Conversation.userId == user_id)
-    #             )
-    #             user = result.scalars().first()
+        # Check if we need to initialize default conversation records
+        async with SessionLocal() as session:
+            # Helper function to add a test user if needed
+            async def ensure_user_exists(user_id):
+                # Handle non-UUID strings by generating a deterministic UUID
+                try:
+                    if isinstance(user_id, str) and len(user_id) < 32:
+                        # This creates a deterministic UUID for the same string
+                        user_id_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, user_id))
+                        print(f"Converting '{user_id}' to UUID: {user_id_uuid}")
+                    else:
+                        # If it's already a valid UUID string or object, keep it
+                        user_id_uuid = user_id
+                except Exception as e:
+                    print(f"Error converting user_id to UUID: {e}")
+                    user_id_uuid = str(uuid.uuid4())  # Generate random UUID as fallback
                 
-    #             if not user:
-    #                 print(f"Creating new conversation record for user: {user_id}")
-    #                 new_user = Conversation(
-    #                     userId=user_id,
-    #                     conversation=[]  # Empty conversation array
-    #                 )
-    #                 session.add(new_user)
-    #                 return True
-    #             return False
-            
-    #         # Ensure some common user IDs exist
-    #         changes = False
-    #         changes |= await ensure_user_exists("guest")
-    #         changes |= await ensure_user_exists("test-user")
-            
-    #         if changes:
-    #             await session.commit()
+                result = await session.execute(
+                    select(Conversation).where(Conversation.userId == user_id_uuid)
+                )
+                user = result.scalars().first()
                 
-    #     print("Database setup completed successfully")
-    # except Exception as e:
-    #     print(f"Error during database initialization: {e}")
-    #     traceback.print_exc()
+                if not user:
+                    print(f"Creating new conversation record for user: {user_id_uuid}")
+                    new_user = Conversation(
+                        id=uuid.uuid4(),
+                        userId=user_id_uuid,
+                        conversation=[]  # Empty conversation array
+                    )
+                    session.add(new_user)
+                    return True
+                return False
+            
+            # Ensure some common user IDs exist - now with UUID conversion
+            changes = False
+            changes |= await ensure_user_exists("guest")
+            changes |= await ensure_user_exists("test-user")
+            
+            if changes:
+                await session.commit()
+                
+        print("Database setup completed successfully")
+    except Exception as e:
+        print(f"Error during database initialization: {e}")
+        traceback.print_exc()
 
 
 
@@ -319,42 +349,52 @@ async def add_or_update_user_note(
 
 async def get_user_profile(user_id: str):
     """Get complete user profile including physical stats and preferences."""
+    print(f"Fetching profile for user ID: {user_id}")
+    
+    # Convert string user_id to UUID using same logic as in init_database
+    try:
+        if isinstance(user_id, str) and len(user_id) < 32:
+            # For short strings like "guest", use the same deterministic UUID generation
+            user_id_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, user_id)
+            print(f"Converting '{user_id}' to UUID: {user_id_uuid}")
+        elif isinstance(user_id, str):
+            # For strings that might already be UUIDs
+            user_id_uuid = uuid.UUID(user_id)
+        else:
+            # If it's already a UUID object
+            user_id_uuid = user_id
+    except ValueError:
+        # Handle invalid UUID format
+        print(f"Invalid UUID format for user_id: {user_id}")
+        return {}
+    
     async with SessionLocal() as session:
         try:
             result = await session.execute(
-                select(User).where(User.id == user_id)
+                select(User).where(User.id == user_id_uuid)
             )
             user = result.scalars().first()
             
             if not user:
+                print(f"No user found with ID: {user_id} (UUID: {user_id_uuid})")
                 return {}
                 
-            return {
+            # Make sure healthMetrics is properly handled as a dict, not a list
+            user_data = {
                 "id": str(user.id),
                 "name": user.name,
                 "email": user.email,
                 "fitnessGoal": user.fitnessGoal,
                 "dietaryPreferences": user.dietaryPreferences or [],
+                "healthMetrics": user.healthMetrics or {}, # Change from [] to {}
                 "physicalStats": user.physicalStats or {},
                 "preferences": user.preferences or {}
             }
+            print(f"Retrieved user data: {user_data}")
+            return user_data
         except Exception as e:
             print(f"Error fetching user profile: {e}")
             traceback.print_exc()
             return {}
         
 
-class User(Base):
-    """Database model for users."""
-    __tablename__ = "User"
-    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
-    name = Column(String, nullable=False)
-    email = Column(String, nullable=False, unique=True)
-    password = Column(String, nullable=False)
-    fitnessGoal = Column(String, nullable=True)
-    dietaryPreferences = Column(ARRAY(String), nullable=True)
-    createdAt = Column(DateTime, default=datetime.datetime.utcnow)
-    updatedAt = Column(DateTime, default=datetime.datetime.utcnow)
-    physicalStats = Column(JSONB, nullable=True)
-    preferences = Column(JSONB, nullable=True)
-    version = Column(Integer, default=0)

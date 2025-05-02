@@ -40,12 +40,14 @@ async def extract_user_notes(user_id: str, user_prompt: str, agent_response: str
         4. Metrics (current weight, target weight, measurements)
         5. Lifestyle factors (sleep, stress, time constraints)
         6. Health concerns or limitations
+        7. Health metrics (if mentioned: BMR, BMI, body fat, etc.)
         
         Format your response as valid JSON like this:
         {{
           "notes": [
             {{"category": "dietary_preference", "key": "protein_intake", "value": "60g daily", "confidence": 0.9, "source": "user_stated"}},
             {{"category": "fitness_goal", "key": "weight_loss", "value": "10 pounds in 3 months", "confidence": 0.8, "source": "user_stated"}},
+            {{"category": "health_metric", "key": "current_weight", "value": "180 pounds", "confidence": 0.95, "source": "user_stated"}},
             ...
           ]
         }}
@@ -56,6 +58,7 @@ async def extract_user_notes(user_id: str, user_prompt: str, agent_response: str
         - fitness_goal
         - exercise_habit
         - physical_metric
+        - health_metric
         - lifestyle_factor
         - health_concern
         
@@ -172,8 +175,34 @@ async def get_agent_response(user_id: str, user_prompt: str) -> str:
                 user_context += f"- Gender: {physical_stats.get('gender', 'Not provided')}\n"
                 user_context += f"- Activity Level: {physical_stats.get('activityLevel', 'Not provided')}\n"
             
+            # Add health metrics if available
+            health_metrics = user_profile.get('healthMetrics', {})
+            if health_metrics:
+                user_context += "\nHEALTH METRICS:\n"
+                
+                bmr = health_metrics.get('bmr')
+                if bmr:
+                    user_context += f"- Basal Metabolic Rate (BMR): {bmr} calories/day\n"
+                
+                tdee = health_metrics.get('tdee')
+                if tdee:
+                    user_context += f"- Total Daily Energy Expenditure (TDEE): {tdee} calories/day\n"
+                
+                bmi = health_metrics.get('bmi')
+                if bmi:
+                    user_context += f"- Body Mass Index (BMI): {bmi}\n"
+                
+                body_fat = health_metrics.get('bodyFatPercentage')
+                if body_fat:
+                    user_context += f"- Estimated Body Fat: {body_fat}%\n"
+                
+                lbm = health_metrics.get('lbm')
+                if lbm:
+                    lbm_unit = 'lbs' if measurement_unit == 'imperial' else 'kg'
+                    user_context += f"- Lean Body Mass (LBM): {lbm} {lbm_unit}\n"
+            
             # Fitness goal and dietary preferences
-            user_context += f"- Fitness Goal: {user_profile.get('fitnessGoal', 'Not provided')}\n"
+            user_context += f"\n- Fitness Goal: {user_profile.get('fitnessGoal', 'Not provided')}\n"
             
             dietary_prefs = user_profile.get('dietaryPreferences', [])
             if dietary_prefs:

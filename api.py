@@ -102,7 +102,6 @@ async def get_notes(user_id: str):
         raise HTTPException(status_code=500, detail=f"Error retrieving user notes: {str(e)}")
 
 
-
 # @router.post("/auth/login")
 # async def login(request: LoginRequest):
 #     """
