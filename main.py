@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import router as api_router
 from database import init_database
+from tasks import start_background_worker
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -28,11 +29,12 @@ app.add_middleware(
 app.include_router(api_router, prefix="")
 
 
-# Startup event to initialize database
+# Startup event to initialize database and run background worker for user's data
 @app.on_event("startup")
 async def startup():
-    """Initialize database on application startup"""
+    """Initialize database on application startup and start background worker"""
     await init_database()
+    start_background_worker()
 
 
 # Root endpoint for health check

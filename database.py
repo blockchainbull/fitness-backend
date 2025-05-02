@@ -5,12 +5,15 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, String, select, update
 from sqlalchemy.dialects.postgresql import JSONB
-import datetime
-import traceback
 from config import DATABASE_URL
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.mutable import MutableList
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Index, select, update
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
+from sqlalchemy.orm import relationship
 import uuid
+import datetime
+import traceback
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -116,6 +119,8 @@ async def append_to_user_conversation(user_id: str, user_message: str, agent_mes
         print(f"Error appending to conversation: {e}")
         traceback.print_exc()
         raise
+
+
 
 
 # PRESERVED COMMENTED CODE: Alternative implementation (legacy)
@@ -224,3 +229,132 @@ async def init_database():
     # except Exception as e:
     #     print(f"Error during database initialization: {e}")
     #     traceback.print_exc()
+
+
+
+# New models for user notes
+class UserNotes(Base):
+    """Database model for storing structured user notes."""
+    __tablename__ = "UserNotes"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True, default=uuid.uuid4)
+    userId = Column(UUID(as_uuid=True), ForeignKey("User.id"), index=True)
+    category = Column(String, nullable=False)
+    key = Column(String, nullable=False)
+    value = Column(String, nullable=False)
+    confidence = Column(Float, default=0.5)
+    source = Column(String, default="inferred")
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('userId', 'key', name='userNotes_userId_key_unique'),
+    )
+
+# Add functions to work with user notes
+async def get_user_notes(user_id: str):
+    """Retrieve all notes for a specific user."""
+    async with SessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(UserNotes).where(UserNotes.userId == user_id)
+                .order_by(UserNotes.confidence.desc())
+            )
+            notes = result.scalars().all()
+            return notes
+        except Exception as e:
+            print(f"Error fetching user notes: {e}")
+            traceback.print_exc()
+            return []
+
+async def add_or_update_user_note(
+    user_id: str, 
+    category: str, 
+    key: str, 
+    value: str, 
+    confidence: float = 0.5,
+    source: str = "inferred"
+):
+    """Add or update a user note."""
+    async with SessionLocal() as session:
+        try:
+            # Check if note exists
+            result = await session.execute(
+                select(UserNotes)
+                .where(UserNotes.userId == user_id)
+                .where(UserNotes.key == key)
+            )
+            note = result.scalars().first()
+            
+            if note:
+                # Update existing note
+                await session.execute(
+                    update(UserNotes)
+                    .where(UserNotes.id == note.id)
+                    .values(
+                        value=value,
+                        confidence=confidence,
+                        source=source,
+                        category=category,
+                        timestamp=datetime.datetime.utcnow()
+                    )
+                )
+            else:
+                # Create new note
+                new_note = UserNotes(
+                    id=uuid.uuid4(),
+                    userId=user_id,
+                    category=category,
+                    key=key,
+                    value=value,
+                    confidence=confidence,
+                    source=source
+                )
+                session.add(new_note)
+                
+            await session.commit()
+            return True
+        except Exception as e:
+            print(f"Error adding/updating user note: {e}")
+            traceback.print_exc()
+            return False
+
+async def get_user_profile(user_id: str):
+    """Get complete user profile including physical stats and preferences."""
+    async with SessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = result.scalars().first()
+            
+            if not user:
+                return {}
+                
+            return {
+                "id": str(user.id),
+                "name": user.name,
+                "email": user.email,
+                "fitnessGoal": user.fitnessGoal,
+                "dietaryPreferences": user.dietaryPreferences or [],
+                "physicalStats": user.physicalStats or {},
+                "preferences": user.preferences or {}
+            }
+        except Exception as e:
+            print(f"Error fetching user profile: {e}")
+            traceback.print_exc()
+            return {}
+        
+
+class User(Base):
+    """Database model for users."""
+    __tablename__ = "User"
+    id = Column(UUID(as_uuid=True), primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False, unique=True)
+    password = Column(String, nullable=False)
+    fitnessGoal = Column(String, nullable=True)
+    dietaryPreferences = Column(ARRAY(String), nullable=True)
+    createdAt = Column(DateTime, default=datetime.datetime.utcnow)
+    updatedAt = Column(DateTime, default=datetime.datetime.utcnow)
+    physicalStats = Column(JSONB, nullable=True)
+    preferences = Column(JSONB, nullable=True)
+    version = Column(Integer, default=0)
