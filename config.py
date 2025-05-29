@@ -9,12 +9,12 @@ from openai import OpenAI
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-# Set SQLAlchemy logging to WARNING level to reduce verbosity
-logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
-# Only show actual SQL queries, not the other engine output
-logging.getLogger('sqlalchemy.engine.Engine').setLevel(logging.WARNING)
+# # Configure logging
+# logging.basicConfig(level=logging.INFO)
+# # Set SQLAlchemy logging to WARNING level to reduce verbosity
+# logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
+# # Only show actual SQL queries, not the other engine output
+# logging.getLogger('sqlalchemy.engine.Engine').setLevel(logging.WARNING)
 
 # Database and API config
 DATABASE_URL = os.getenv("DATABASE_URL")

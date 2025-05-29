@@ -235,9 +235,7 @@ async def get_agent_response(user_id: str, user_prompt: str) -> str:
         
         # Add system message with instructions and user context
         system_prompt = f"{user_context}\n\n{SYSTEM_PROMPT}"
-        print("== System Prompt ==")
-        print(system_prompt)
-        
+         
         openai_messages.append({
             "role": "system", 
             "content": system_prompt
@@ -262,8 +260,15 @@ async def get_agent_response(user_id: str, user_prompt: str) -> str:
             "content": user_prompt
         })
         
-        print(f"Sending {len(openai_messages)} messages to OpenAI")
-        
+        # Right before the OpenAI API call in get_agent_response function
+        print("\n=== USER CONTEXT AND SYSTEM PROMPT ===")
+        print(system_prompt)
+        print("\n=== USER QUESTION ===")
+        print(user_prompt)
+        print("\n=== CONVERSATION HISTORY LENGTH ===")
+        print(f"Using {len(openai_messages)} messages in conversation history")
+
+
         # Call OpenAI API
         result = ""
         try:
