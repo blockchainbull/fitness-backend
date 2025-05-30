@@ -59,10 +59,10 @@ class User(Base):
     fitnessGoal = Column(String, nullable=True)
     dietaryPreferences = Column(ARRAY(String), nullable=True)
     healthMetrics = Column(JSONB, nullable=True)
-    createdAt = Column(DateTime, default=datetime.datetime.utcnow)
-    updatedAt = Column(DateTime, default=datetime.datetime.utcnow)
     physicalStats = Column(JSONB, nullable=True)
     preferences = Column(JSONB, nullable=True)
+    createdAt = Column(DateTime, default=datetime.datetime.utcnow)
+    updatedAt = Column(DateTime, default=datetime.datetime.utcnow)
     version = Column(Integer, default=0)
 
 class Conversation(Base):
