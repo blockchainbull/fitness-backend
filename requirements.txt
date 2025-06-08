@@ -1,5 +1,5 @@
 uvicorn
-pydantic==1.10.7
+pydantic
 sqlalchemy
 sqlalchemy[asyncio]
 asyncpg
@@ -11,5 +11,6 @@ fastapi
 dotenv
 pydantic[email]
 email-validator
+bcrypt
 # Commenting out any-agent as it's causing build issues
 # any-agent==0.6.0

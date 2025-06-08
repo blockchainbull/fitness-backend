@@ -1,5 +1,6 @@
 """
 Main application entry point for the nutrition and exercise coach API.
+Updated to support both web and Flutter applications with unified backend.
 """
 import silence_sqlalchemy
 import os
@@ -8,25 +9,24 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import traceback
 from config import DATABASE_URL
-from api import router as api_router
+from api import router as api_router  # Your existing web API routes
 from database import init_database, User, SessionLocal
 from tasks import start_background_worker
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import text, select
-from flutter_routes import health_router
-
+from flutter_routes import health_router  # Flutter-specific routes
+import bcrypt
 
 # SQLAlchemy setup
 Base = declarative_base()
 engine = create_async_engine(DATABASE_URL, echo=True)
 SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-
 # Initialize FastAPI app
 app = FastAPI(
-    title="Nutrition and Exercise Coach API",
-    description="API for a virtual nutrition and exercise coach powered by AI",
-    version="1.0.0"
+    title="Unified Nutrition and Exercise Coach API",
+    description="API for nutrition and exercise coaching - supports both web and mobile applications",
+    version="2.0.0"
 )
 
 # Add CORS middleware
@@ -39,11 +39,10 @@ app.add_middleware(
 )
 
 # Include API routes
-app.include_router(api_router, prefix="")
+app.include_router(api_router, prefix="")  # Web frontend routes
+app.include_router(health_router)  # Flutter/mobile routes
 
-app.include_router(health_router)
-
-# Startup event to initialize database and run background worker for user's data
+# Startup event to initialize database and run background worker
 @app.on_event("startup")
 async def startup():
     """Initialize database on application startup and start background worker"""
@@ -51,39 +50,30 @@ async def startup():
     await init_database()
     start_background_worker()
     
-
-    """
-    # Add verification of database connection and data loading
-    print("Verifying database connection and data loading...")
+    # Verify database connection and show accurate user count
+    print("Verifying unified database connection...")
     try:
         async with SessionLocal() as session:
-            # Force connection test
+            # Test connection
             result = await session.execute(text("SELECT 1"))
-            print("Database connection verified.")
+            print("✅ Database connection verified.")
             
-            # Check for existing users and their data
-            result = await session.execute(select(User).limit(5))
+            # Get accurate count of all users
+            count_result = await session.execute(text("SELECT COUNT(*) FROM users"))
+            total_users = count_result.scalar()
+            print(f"📊 Total users in database: {total_users}")
+            
+            # Check for existing users with more details
+            result = await session.execute(select(User).order_by(User.created_at.desc()).limit(5))
             users = result.scalars().all()
             
-            print(f"Found {len(users)} users in database")
-            
-            # Debug first user's data if exists
-            if users:
-                first_user = users[0]
-                print(f"First user ID: {first_user.id}")
-                print(f"First user physical stats: {first_user.physicalStats}")
+            print(f"👤 Recent users:")
+            for i, user in enumerate(users, 1):
+                print(f"  {i}. {user.name} ({user.email}) - Created: {user.created_at}")
                 
-                if first_user.physicalStats:
-                    ps = first_user.physicalStats
-                    print(f"Physical stats type: {type(ps)}")
-                    
-                    if isinstance(ps, dict):
-                        for key, value in ps.items():
-                            print(f"  {key}: {value} (type: {type(value)})")
     except Exception as e:
-        print(f"Error during startup verification: {e}")
+        print(f"❌ Error during startup verification: {e}")
         traceback.print_exc()
-        """
 
 # Root endpoint for health check
 @app.get("/")
@@ -91,10 +81,16 @@ async def root():
     """API health check endpoint"""
     return {
         "status": "online",
-        "message": "Nutrition and Exercise Coach API is running",
-        "version": "1.0.0"
+        "message": "Unified Nutrition and Exercise Coach API is running",
+        "version": "2.0.0",
+        "supports": ["web", "flutter", "mobile"],
+        "endpoints": {
+            "web": "/api/*",
+            "mobile": "/api/health/*",
+            "onboarding": "/api/onboarding/complete",
+            "auth": "/api/auth/login"
+        }
     }
-
 
 # Run the application
 if __name__ == "__main__":

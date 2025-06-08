@@ -1,10 +1,11 @@
-# flutter_models.py
+# flutter_models.py - Updated to work with unified backend
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import date
 import uuid
 
 class HealthUserCreate(BaseModel):
+    # Basic info
     name: str
     email: EmailStr
     password: str
@@ -18,12 +19,12 @@ class HealthUserCreate(BaseModel):
     bmi: Optional[float] = None
     bmr: Optional[float] = None
     tdee: Optional[float] = None
-    formData: Optional[dict] = None
     
     # Goals
     primaryGoal: Optional[str] = ""
     weightGoal: Optional[str] = ""
     targetWeight: Optional[float] = 0
+    goalTimeline: Optional[str] = ""
     
     # Sleep
     sleepHours: Optional[float] = 7
@@ -47,6 +48,9 @@ class HealthUserCreate(BaseModel):
     availableEquipment: Optional[List[str]] = []
     fitnessLevel: Optional[str] = "Beginner"
     hasTrainer: Optional[bool] = False
+    
+    # Additional data (for compatibility)
+    formData: Optional[dict] = None
 
 class HealthUserResponse(BaseModel):
     success: bool
@@ -69,3 +73,13 @@ class MealRequest(BaseModel):
     description: str
     calories: int
     mealTime: str
+
+# New model that matches your onboarding structure
+class UnifiedOnboardingRequest(BaseModel):
+    basicInfo: Optional[Dict[str, Any]] = {}
+    primaryGoal: Optional[str] = ""
+    weightGoal: Optional[Dict[str, Any]] = {}
+    sleepInfo: Optional[Dict[str, Any]] = {}
+    dietaryPreferences: Optional[Dict[str, Any]] = {}
+    workoutPreferences: Optional[Dict[str, Any]] = {}
+    exerciseSetup: Optional[Dict[str, Any]] = {}
