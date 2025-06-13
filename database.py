@@ -676,6 +676,7 @@ async def add_or_update_user_note(
             traceback.print_exc()
             return False
         
+
 async def update_user_in_db(user_id: str, update_data: dict):
     """Update user information in database"""
     try:
