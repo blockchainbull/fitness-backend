@@ -314,6 +314,23 @@ async def get_user_conversation(user_id: str):
     """
     async with SessionLocal() as session:
         try:
+            # Convert string to UUID if needed
+            if isinstance(user_id, str):
+                try:
+                    user_id_uuid = uuid.UUID(user_id)
+                except ValueError:
+                    # If it's not a valid UUID, try to find user by email first
+                    user = await get_user_by_email(user_id)
+                    if user:
+                        user_id_uuid = user.id
+                    else:
+                        # Create deterministic UUID for guest users
+                        user_id_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, user_id)
+            else:
+                user_id_uuid = user_id
+            
+            print(f"🔍 Looking for conversation with UUID: {user_id_uuid}")
+
             # First try to find existing conversation
             result = await session.execute(
                 select(Conversation).where(Conversation.user_id == user_id)
@@ -367,6 +384,25 @@ async def append_to_user_conversation(user_id: str, user_message: str, agent_mes
 
     try:
         async with SessionLocal() as session:
+
+             # Convert string to UUID if needed
+            if isinstance(user_id, str):
+                try:
+                    user_id_uuid = uuid.UUID(user_id)
+                except ValueError:
+                    # If it's not a valid UUID, try to find user by email first
+                    user = await get_user_by_email(user_id)
+                    if user:
+                        user_id_uuid = user.id
+                    else:
+                        # Create deterministic UUID for guest users
+                        user_id_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, user_id)
+            else:
+                user_id_uuid = user_id
+            
+            print(f"💾 Saving conversation for UUID: {user_id_uuid}")
+
+
             # First, retrieve the current conversation record
             result = await session.execute(
                 select(Conversation).where(Conversation.user_id == user_id)
@@ -639,3 +675,70 @@ async def add_or_update_user_note(
             print(f"Error adding/updating user note: {e}")
             traceback.print_exc()
             return False
+        
+async def update_user_in_db(user_id: str, update_data: dict):
+    """Update user information in database"""
+    try:
+        # Calculate BMI if height and weight are provided
+        height = update_data.get('height')
+        weight = update_data.get('weight')
+        
+        if height and weight:
+            height_m = height / 100  # Convert cm to meters
+            bmi = weight / (height_m ** 2)
+            update_data['bmi'] = round(bmi, 1)
+            
+            # Calculate BMR if age and gender are provided
+            age = update_data.get('age')
+            gender = update_data.get('gender')
+            
+            if age and gender:
+                if gender.lower() == 'male':
+                    bmr = 88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age)
+                else:
+                    bmr = 447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age)
+                update_data['bmr'] = round(bmr)
+        
+                # Update in your database (adjust based on your database setup)
+                # This is a placeholder - implement based on your database
+                users_collection = get_database()["users"]
+
+                result = await users_collection.update_one(
+                {"id": user_id},
+                {"$set": update_data}
+            )
+            
+            if result.matched_count == 0:
+                raise Exception(f"User with id {user_id} not found")
+            
+            # Get updated user
+            updated_user = await users_collection.find_one({"id": user_id})
+            if updated_user:
+                updated_user.pop('_id', None)  # Remove MongoDB _id field
+                return updated_user
+            else:
+                raise Exception("Failed to retrieve updated user")
+           
+    except Exception as e:
+        print(f"Database error updating user: {e}")
+        raise e
+    
+async def update_user_password_in_db(user_id: str, new_password_hash: str):
+    """Update user password in database"""
+    try:
+        users_collection = get_database()["users"]
+        
+        result = await users_collection.update_one(
+            {"id": user_id},
+            {"$set": {"password_hash": new_password_hash}}
+        )
+        
+        if result.matched_count == 0:
+            raise Exception(f"User with id {user_id} not found")
+        
+        print(f"✅ Password hash updated in database for user: {user_id}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Database error updating password: {e}")
+        raise e
