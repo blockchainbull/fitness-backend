@@ -1,19 +1,80 @@
 """
 API routes for the nutrition and exercise coach application.
 """
-from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, EmailStr
-from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, HTTPException, status, Depends
+from pydantic import BaseModel, EmailStr, Field
+from typing import Optional, Dict, Any
 from models import PromptRequest, ConversationResponse
-from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile
+from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile, SessionLocal
 from agent import get_agent_response
+from sqlalchemy.orm import Session
+from sqlalchemy import select
 from passlib.context import CryptContext
-from fastapi import HTTPException, status
 import traceback
-import datetime
+from datetime import datetime, timezone
+from database import User
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 router = APIRouter()
+
+class UserUpdateRequest(BaseModel):
+    """
+    Pydantic model for user profile updates.
+    Excludes readonly fields: name, email, age, gender
+    """
+    # Physical stats (editable)
+    height: Optional[float] = Field(None, ge=0, le=300, description="Height in cm")
+    weight: Optional[float] = Field(None, ge=0, le=1000, description="Weight in kg")
+    activity_level: Optional[str] = Field(None, pattern="^(Sedentary|Lightly active|Moderately active|Very active|Extra active)$")
+    
+    # Goals and preferences (editable)
+    primary_goal: Optional[str] = None
+    fitness_goal: Optional[str] = None
+    weight_goal: Optional[str] = Field(None, pattern="^(lose_weight|gain_weight|maintain_weight)$")
+    target_weight: Optional[float] = Field(None, ge=0, le=1000)
+    goal_timeline: Optional[str] = None
+    
+    # Sleep preferences (editable)
+    sleep_hours: Optional[float] = Field(None, ge=0, le=24)
+    bedtime: Optional[str] = None
+    wakeup_time: Optional[str] = None
+    sleep_issues: Optional[list] = None
+    
+    # Nutrition preferences (editable)
+    dietary_preferences: Optional[list] = None
+    water_intake: Optional[float] = Field(None, ge=0, le=20)
+    medical_conditions: Optional[list] = None
+    other_medical_condition: Optional[str] = None
+    
+    # Exercise preferences (editable)
+    preferred_workouts: Optional[list] = None
+    workout_frequency: Optional[int] = None
+    workout_duration: Optional[int] = None
+    workout_location: Optional[str] = None
+    available_equipment: Optional[list] = None
+    fitness_level: Optional[str] = None
+    has_trainer: Optional[bool] = None
+    
+    # Additional preferences
+    preferences: Optional[dict] = None
+
+class UserResponse(BaseModel):
+    """Response model for user data"""
+    id: str
+    name: str
+    email: str
+    age: Optional[int]
+    gender: Optional[str]
+    height: Optional[float]
+    weight: Optional[float]
+    activity_level: Optional[str]
+    bmi: Optional[float]
+    bmr: Optional[float]
+    tdee: Optional[float]
+    
+    class Config:
+        from_attributes = True
+
 
 class OnboardingCompleteRequest(BaseModel):
     basicInfo: Optional[Dict[str, Any]] = {}
@@ -40,13 +101,47 @@ class LoginResponse(BaseModel):
     message: Optional[str] = None
     error: Optional[str] = None
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    return pwd_context.verify(plain_password, hashed_password)
+async def get_db():
+    async with SessionLocal() as session:
+        yield session
 
-def get_password_hash(password: str) -> str:
-    """Hash a password"""
-    return pwd_context.hash(password)
+def calculate_health_metrics(height: float, weight: float, age: int, gender: str, activity_level: str) -> dict:
+    """Calculate BMI, BMR, and TDEE"""
+    if not all([height, weight, age, gender]):
+        return {'bmi': 0, 'bmr': 0, 'tdee': 0}
+    
+    # Calculate BMI
+    height_m = height / 100  # Convert cm to meters
+    bmi = weight / (height_m ** 2)
+    
+    # Calculate BMR using Mifflin-St Jeor Equation
+    if gender.lower() == 'male':
+        bmr = 10 * weight + 6.25 * height - 5 * age + 5
+    else:  # female
+        bmr = 10 * weight + 6.25 * height - 5 * age - 161
+    
+    # Calculate TDEE based on activity level
+    activity_multipliers = {
+        'Sedentary': 1.2,
+        'Lightly active': 1.375,
+        'Moderately active': 1.55,
+        'Very active': 1.725,
+        'Extra active': 1.9,
+
+        'lightly_active': 1.375,
+        'moderately_active': 1.55,
+        'very_active': 1.725,
+        'extra_active': 1.9
+    }
+    
+    multiplier = activity_multipliers.get(activity_level, 1.2)
+    tdee = bmr * multiplier
+    
+    return {
+        'bmi': round(bmi, 1),
+        'bmr': round(bmr, 0),
+        'tdee': round(tdee, 0)
+    }
 
 @router.post("/api/onboarding/complete", response_model=OnboardingCompleteResponse)
 async def complete_onboarding(onboarding_data: OnboardingCompleteRequest):
@@ -219,7 +314,7 @@ async def send_chat_message(request: dict):
         return {
             "success": True,
             "response": response,
-            "timestamp": datetime.datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat()
         }
         
     except Exception as e:
@@ -245,59 +340,171 @@ async def get_chat_history(user_id: str):
     
 
 @router.put("/update-user/{user_id}")
-async def update_user_profile(user_id: str, user_data: dict):
-    """Update user profile information"""
+async def update_user_profile(
+    user_id: str,
+    user_data: UserUpdateRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Update user profile with field restrictions enforced.
+    READONLY FIELDS: name, email, age, gender cannot be updated.
+    """
     try:
-        print(f"📝 Updating user profile for: {user_id}")
-        print(f"📋 Update data: {user_data}")
+
+        # DEBUG: Print exactly what we received
+        print(f"🔍 Received user_data: {user_data}")
+        print(f"🔍 Raw user_data dict: {user_data.dict()}")
+        print(f"🔍 User_data dict exclude_none: {user_data.dict(exclude_none=True)}")
+
+        # Get the user
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalars().first()
         
-        # Validate required fields if needed
-        if 'email' in user_data:
-            # Add email validation if needed
-            pass
-            
-        # Calculate BMI if height and weight are provided
-        height = user_data.get('height')
-        weight = user_data.get('weight')
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
         
-        if height and weight:
-            height_m = height / 100  # Convert cm to meters
-            bmi = weight / (height_m ** 2)
-            user_data['bmi'] = round(bmi, 1)
-            
-            # Calculate BMR if age and gender are provided
-            age = user_data.get('age')
-            gender = user_data.get('gender')
-            
-            if age and gender:
-                if gender.lower() == 'male':
-                    bmr = 88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age)
-                else:
-                    bmr = 447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age)
-                user_data['bmr'] = round(bmr)
+        # Get the update data, excluding None values
+        update_data = user_data.dict(exclude_none=True)
+        
+        print(f"🔍 Received update data: {update_data}")
+        
+        # SECURITY CHECK: Ensure readonly fields are not being updated
+        readonly_fields = {'name', 'email', 'age', 'gender', 'id', 'password_hash', 'created_at'}
+        attempted_readonly_updates = set(update_data.keys()) & readonly_fields
+        
+        if attempted_readonly_updates:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot update readonly fields: {', '.join(attempted_readonly_updates)}. "
+                       f"Fields 'name', 'email', 'age', and 'gender' cannot be modified."
+            )
+        
+        # Store original values for health metric calculation
+        original_height = user.height
+        original_weight = user.weight
+        original_age = user.age
+        original_gender = user.gender
+        original_activity = user.activity_level
+        
+        print(f"🔍 Original values: height={original_height}, weight={original_weight}, age={original_age}, gender={original_gender}, activity={original_activity}")
+        
+        # Update allowed fields
+        for field, value in update_data.items():
+            if hasattr(user, field) and field not in readonly_fields:
+                # Convert string numbers to integers for specific fields
+                if field in ['workout_frequency', 'workout_duration']:
+                    if value is not None and value != '':
+                        try:
+                            value = int(value)
+                        except (ValueError, TypeError):
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Invalid value for {field}: must be a valid integer"
+                            )
                 
-                # Calculate TDEE based on activity level
-                activity_multipliers = {
-                    'sedentary': 1.2,
-                    'lightlyActive': 1.375,
-                    'moderatelyActive': 1.55,
-                    'veryActive': 1.725,
-                    'extraActive': 1.9
-                }
-                activity_level = user_data.get('activityLevel', 'moderatelyActive')
-                tdee = bmr * activity_multipliers.get(activity_level, 1.55)
-                user_data['tdee'] = round(tdee)
+                # Convert string numbers to floats for specific fields
+                elif field in ['height', 'weight', 'target_weight', 'sleep_hours', 'water_intake']:
+                    if value is not None and value != '':
+                        try:
+                            value = float(value)
+                        except (ValueError, TypeError):
+                            raise HTTPException(
+                                status_code=status.HTTP_400_BAD_REQUEST,
+                                detail=f"Invalid value for {field}: must be a valid number"
+                            )
+                
+                print(f"🔍 Setting {field} = {value}")
+                setattr(user, field, value)
         
-        # Update in database
-        from database import update_user_in_db
-        updated_user = await update_user_in_db(user_id, user_data)
+        # ALWAYS recalculate health metrics when physical stats OR activity level changes
+        height_changed = 'height' in update_data
+        weight_changed = 'weight' in update_data
+        activity_changed = 'activity_level' in update_data
         
-        print(f"✅ User profile updated successfully")
-        return updated_user
+        print(f"🔍 Changes detected: height={height_changed}, weight={weight_changed}, activity={activity_changed}")
         
+        # Force recalculation if any relevant field changed
+        if height_changed or weight_changed or activity_changed:
+            current_height = user.height or original_height
+            current_weight = user.weight or original_weight
+            current_age = original_age  # Age is readonly, so use original
+            current_gender = original_gender  # Gender is readonly, so use original
+            current_activity = user.activity_level or original_activity
+            
+            print(f"🔍 Current values for calculation: height={current_height}, weight={current_weight}, age={current_age}, gender={current_gender}, activity={current_activity}")
+            
+            if all([current_height, current_weight, current_age, current_gender, current_activity]):
+                health_metrics = calculate_health_metrics(
+                    current_height, current_weight, current_age, 
+                    current_gender, current_activity
+                )
+                
+                print(f"🔍 New health metrics: {health_metrics}")
+                
+                user.bmi = health_metrics['bmi']
+                user.bmr = health_metrics['bmr']
+                user.tdee = health_metrics['tdee']
+            else:
+                print(f"🔍 Missing required data for health calculation")
+        
+        # Update timestamp
+        user.updated_at = datetime.now(timezone.utc)
+        
+        # Commit changes
+        await db.commit()
+        await db.refresh(user)
+        
+        # Return updated user data
+        return {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+            "age": user.age,
+            "gender": user.gender,
+            "height": user.height,
+            "weight": user.weight,
+            "activity_level": user.activity_level,
+            "bmi": user.bmi,
+            "bmr": user.bmr,
+            "tdee": user.tdee,
+            "primary_goal": user.primary_goal,
+            "fitness_goal": user.fitness_goal,
+            "weight_goal": user.weight_goal,
+            "target_weight": user.target_weight,
+            "goal_timeline": user.goal_timeline,
+            "sleep_hours": user.sleep_hours,
+            "bedtime": user.bedtime,
+            "wakeup_time": user.wakeup_time,
+            "sleep_issues": user.sleep_issues,
+            "dietary_preferences": user.dietary_preferences,
+            "water_intake": user.water_intake,
+            "medical_conditions": user.medical_conditions,
+            "other_medical_condition": user.other_medical_condition,
+            "preferred_workouts": user.preferred_workouts,
+            "workout_frequency": user.workout_frequency,
+            "workout_duration": user.workout_duration,
+            "workout_location": user.workout_location,
+            "available_equipment": user.available_equipment,
+            "fitness_level": user.fitness_level,
+            "has_trainer": user.has_trainer,
+            "preferences": user.preferences,
+            "updated_at": user.updated_at
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        print(f"❌ Error updating user profile: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error updating user profile: {e}")
+        traceback.print_exc()
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error while updating profile"
+        )
     
 
 @router.put("/update-password/{user_id}")
@@ -321,9 +528,66 @@ async def update_user_password(user_id: str, password_data: dict):
         
         print(f"🔐 Password update requested for user: {user_id}")
         
-        # Get user from database
-        from database import get_user_by_id, update_user_password_in_db
-        user = await get_user_by_id(user_id)
+        # Get user from database using SQLAlchemy
+        async with SessionLocal() as session:
+            result = await session.execute(select(User).where(User.id == user_id))
+            user = result.scalars().first()
+            
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            
+            # FIXED: Use dot notation instead of .get() for SQLAlchemy objects
+            password_to_verify = user.password_hash or user.password
+            
+            if not password_to_verify:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No password set for user"
+                )
+            
+            # Verify current password using the same system
+            if not verify_password(current_password, password_to_verify):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Current password is incorrect"
+                )
+            
+            # Hash new password with passlib (same as login system)
+            new_password_hash = get_password_hash(new_password)
+            
+            # Update both password fields for compatibility
+            user.password = new_password_hash
+            user.password_hash = new_password_hash
+            user.updated_at = datetime.datetime.utcnow()
+            
+            await session.commit()
+            
+            print(f"✅ Password updated successfully for user: {user_id}")
+            
+            return {"message": "Password updated successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating password: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update password"
+        )
+    
+@router.get("/user/{user_id}/editable-fields")
+async def get_editable_fields(user_id: str, db: Session = Depends(get_db)):
+    """
+    Get list of fields that can be edited for a user.
+    This endpoint helps the frontend know which fields to make readonly.
+    """
+    try:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalars().first()
         
         if not user:
             raise HTTPException(
@@ -331,29 +595,61 @@ async def update_user_password(user_id: str, password_data: dict):
                 detail="User not found"
             )
         
-        # Verify current password
-        if not verify_password(current_password, user.get("password_hash", "")):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Current password is incorrect"
-            )
+        # Get all user model fields
+        all_fields = set(User.__table__.columns.keys())
+        readonly_fields = User.READONLY_FIELDS
+        editable_fields = all_fields - readonly_fields
         
-        # Hash new password
-        new_password_hash = get_password_hash(new_password)
-        
-        # Update password in database
-        await update_user_password_in_db(user_id, new_password_hash)
-        
-        print(f"✅ Password updated successfully for user: {user_id}")
-        
-        return {"message": "Password updated successfully"}
+        return {
+            "editable_fields": list(editable_fields),
+            "readonly_fields": list(readonly_fields),
+            "restricted_message": "Fields 'name', 'email', 'age', and 'gender' cannot be modified from the profile page."
+        }
         
     except HTTPException:
-        # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        print(f"❌ Error updating password: {e}")
+        print(f"Error getting editable fields: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update password"
+            detail="Internal server error"
         )
+
+@router.get("/user/{user_id}/profile")
+async def get_user_profile_route(user_id: str, db: Session = Depends(get_db)):
+    """Get user profile with field editability information"""
+    try:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalars().first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        user_dict = user.to_dict()
+        
+        # Add field restriction information
+        user_dict['field_restrictions'] = {
+            'readonly_fields': list(User.READONLY_FIELDS),
+            'editable_fields': list(user.get_editable_fields()),
+            'restriction_reason': {
+                'name': 'Name cannot be changed for security reasons',
+                'email': 'Email cannot be changed as it is used for login',
+                'age': 'Age cannot be modified after account creation',
+                'gender': 'Gender cannot be modified after account creation'
+            }
+        }
+        
+        return user_dict
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting user profile: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
+    

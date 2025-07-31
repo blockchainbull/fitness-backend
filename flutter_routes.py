@@ -1,15 +1,12 @@
 # flutter_routes.py - Updated to use unified backend
-from fastapi import APIRouter, HTTPException, status
-import bcrypt
-import uuid
-from typing import List
-import psycopg2
+from fastapi import APIRouter, HTTPException
+import traceback
 
 from flutter_models import (
     HealthUserCreate, HealthUserResponse, HealthLoginRequest, 
     WaterIntakeRequest, MealRequest, UnifiedOnboardingRequest
 )
-from database import get_health_db_cursor, create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile
+from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile
 
 # Create a separate router for health endpoints
 health_router = APIRouter(prefix="/api/health", tags=["mobile-health"])
@@ -38,6 +35,16 @@ async def create_health_user(user_profile: HealthUserCreate):
                 "bmr": user_profile.bmr,
                 "tdee": user_profile.tdee
             },
+
+            "periodCycle": {
+                "hasPeriods": user_profile.hasPeriods,
+                "lastPeriodDate": user_profile.lastPeriodDate,
+                "cycleLength": user_profile.cycleLength,
+                "cycleLengthRegular": user_profile.cycleLengthRegular,
+                "pregnancyStatus": user_profile.pregnancyStatus,
+                "trackingPreference": user_profile.periodTrackingPreference,
+            } if user_profile.gender and user_profile.gender.lower() == 'female' else {},
+            
             "primaryGoal": user_profile.primaryGoal,
             "weightGoal": {
                 "weightGoal": user_profile.weightGoal,
@@ -89,6 +96,24 @@ async def create_health_user(user_profile: HealthUserCreate):
 async def complete_flutter_onboarding(onboarding_data: UnifiedOnboardingRequest):
     """Complete onboarding process for Flutter app using unified format"""
     try:
+        print("🔍 DEBUGGING ONBOARDING DATA RECEIVED:")
+        print(f"📧 Email: {onboarding_data.basicInfo.get('email')}")
+        print(f"⚧ Gender: {onboarding_data.basicInfo.get('gender')}")
+        
+        # ADD THIS DEBUGGING FOR PERIOD CYCLE DATA
+        if hasattr(onboarding_data, 'periodCycle') and onboarding_data.periodCycle:
+            print(f"🌸 Period cycle data received:")
+            print(f"  hasPeriods: {onboarding_data.periodCycle.get('hasPeriods')}")
+            print(f"  lastPeriodDate: {onboarding_data.periodCycle.get('lastPeriodDate')}")
+            print(f"  cycleLength: {onboarding_data.periodCycle.get('cycleLength')}")
+            print(f"  cycleLengthRegular: {onboarding_data.periodCycle.get('cycleLengthRegular')}")
+            print(f"  pregnancyStatus: {onboarding_data.periodCycle.get('pregnancyStatus')}")
+            print(f"  trackingPreference: {onboarding_data.periodCycle.get('trackingPreference')}")
+        else:
+            print("❌ No period cycle data received")
+            
+        print(f"📦 Full onboarding data: {onboarding_data.dict()}")
+        
         # Check if user already exists
         email = onboarding_data.basicInfo.get('email')
         if not email:
@@ -111,6 +136,7 @@ async def complete_flutter_onboarding(onboarding_data: UnifiedOnboardingRequest)
         raise
     except Exception as e:
         print(f"Error completing Flutter onboarding: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @health_router.post("/login", response_model=HealthUserResponse)
@@ -145,8 +171,9 @@ async def get_health_user_profile(user_id: str):
         if not user_profile:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # Format for Flutter app compatibility
+        # Format for Flutter app compatibility - ADD PERIOD CYCLE FIELDS
         flutter_profile = {
+            'id': user_profile.get('id', ''),
             'name': user_profile.get('name', ''),
             'email': user_profile.get('email', ''),
             'gender': user_profile.get('gender', ''),
@@ -154,6 +181,14 @@ async def get_health_user_profile(user_id: str):
             'height': user_profile.get('height', 0.0),
             'weight': user_profile.get('weight', 0.0),
             'activityLevel': user_profile.get('activityLevel', ''),
+            
+            'hasPeriods': user_profile.get('hasPeriods') or user_profile.get('has_periods'),
+            'lastPeriodDate': user_profile.get('lastPeriodDate') or user_profile.get('last_period_date'),
+            'cycleLength': user_profile.get('cycleLength') or user_profile.get('cycle_length'),
+            'cycleLengthRegular': user_profile.get('cycleLengthRegular') or user_profile.get('cycle_length_regular'),
+            'pregnancyStatus': user_profile.get('pregnancyStatus') or user_profile.get('pregnancy_status'),
+            'periodTrackingPreference': user_profile.get('periodTrackingPreference') or user_profile.get('period_tracking_preference'),
+            
             'primaryGoal': user_profile.get('primaryGoal', ''),
             'weightGoal': user_profile.get('weightGoal', ''),
             'targetWeight': user_profile.get('targetWeight', 0.0),

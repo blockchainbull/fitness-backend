@@ -175,6 +175,62 @@ async def get_agent_response(user_id: str, user_prompt: str) -> str:
                 user_context += f"- Gender: {physical_stats.get('gender', 'Not provided')}\n"
                 user_context += f"- Activity Level: {physical_stats.get('activityLevel', 'Not provided')}\n"
             
+            # Reproductive health information (for female users)
+            gender = user_profile.get('gender') or physical_stats.get('gender', '').lower()
+            if gender and gender.lower() == 'female':
+                user_context += "\nREPRODUCTIVE HEALTH INFORMATION:\n"
+                
+                has_periods = user_profile.get('has_periods')
+                if has_periods is not None:
+                    user_context += f"- Currently has menstrual periods: {'Yes' if has_periods else 'No'}\n"
+                    
+                    if has_periods:
+                        # Add period-specific information
+                        last_period_date = user_profile.get('last_period_date')
+                        if last_period_date:
+                            # Format the date nicely
+                            try:
+                                from datetime import datetime
+                                if isinstance(last_period_date, str):
+                                    last_period = datetime.fromisoformat(last_period_date.replace('Z', '+00:00')).strftime('%B %d, %Y')
+                                else:
+                                    last_period = last_period_date.strftime('%B %d, %Y')
+                                user_context += f"- Last period date: {last_period}\n"
+                            except:
+                                user_context += f"- Last period date: {last_period_date}\n"
+                        
+                        cycle_length = user_profile.get('cycle_length')
+                        if cycle_length:
+                            user_context += f"- Average cycle length: {cycle_length} days\n"
+                        
+                        cycle_regular = user_profile.get('cycle_length_regular')
+                        if cycle_regular is not None:
+                            user_context += f"- Cycle regularity: {'Regular' if cycle_regular else 'Irregular'}\n"
+                        
+                        pregnancy_status = user_profile.get('pregnancy_status')
+                        if pregnancy_status and pregnancy_status != 'prefer_not_to_say':
+                            status_map = {
+                                'not_pregnant': 'Not pregnant',
+                                'pregnant': 'Currently pregnant',
+                                'breastfeeding': 'Currently breastfeeding',
+                                'trying_to_conceive': 'Trying to conceive',
+                                'rather_not_say':'Rather not say'
+                            }
+                            readable_status = status_map.get(pregnancy_status, pregnancy_status.replace('_', ' ').title())
+                            user_context += f"- Current status: {readable_status}\n"
+                    
+                    tracking_preference = user_profile.get('period_tracking_preference')
+                    if tracking_preference:
+                        pref_map = {
+                            'track_periods': 'Wants period tracking features',
+                            'general_wellness': 'Interested in general wellness support',
+                            'no_tracking': 'Prefers no period-related features'
+                        }
+                        readable_pref = pref_map.get(tracking_preference, tracking_preference.replace('_', ' ').title())
+                        user_context += f"- Tracking preference: {readable_pref}\n"
+                else:
+                    user_context += "- Reproductive health information: Not provided during onboarding\n"
+
             # Add health metrics if available
             health_metrics = user_profile.get('healthMetrics', {})
             if health_metrics:

@@ -2,7 +2,6 @@
 from pydantic import BaseModel, EmailStr
 from typing import List, Optional, Dict, Any
 from datetime import date
-import uuid
 
 class HealthUserCreate(BaseModel):
     # Basic info
@@ -14,6 +13,13 @@ class HealthUserCreate(BaseModel):
     height: Optional[float] = None
     weight: Optional[float] = None
     activityLevel: Optional[str] = None
+    
+    hasPeriods: Optional[bool] = None
+    lastPeriodDate: Optional[str] = None
+    cycleLength: Optional[int] = None
+    cycleLengthRegular: Optional[bool] = None
+    pregnancyStatus: Optional[str] = None
+    periodTrackingPreference: Optional[str] = None
     
     # Health metrics
     bmi: Optional[float] = None
@@ -74,9 +80,17 @@ class MealRequest(BaseModel):
     calories: int
     mealTime: str
 
-# New model that matches your onboarding structure
+class PeriodCycleData(BaseModel):
+    hasPeriods: Optional[bool] = None
+    lastPeriodDate: Optional[str] = None
+    cycleLength: Optional[int] = None
+    cycleLengthRegular: Optional[bool] = None
+    pregnancyStatus: Optional[str] = None
+    trackingPreference: Optional[str] = None
+
 class UnifiedOnboardingRequest(BaseModel):
     basicInfo: Optional[Dict[str, Any]] = {}
+    periodCycle: Optional[Dict[str, Any]] = {}
     primaryGoal: Optional[str] = ""
     weightGoal: Optional[Dict[str, Any]] = {}
     sleepInfo: Optional[Dict[str, Any]] = {}

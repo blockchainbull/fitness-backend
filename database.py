@@ -5,11 +5,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from config import DATABASE_URL
 from sqlalchemy.ext.mutable import MutableList
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Index, select, update, text, Boolean, TIMESTAMP
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Index, select, update, text, Boolean, TIMESTAMP, UUID
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship
 import psycopg2
+from passlib.context import CryptContext
 from psycopg2.extras import RealDictCursor
+from sqlalchemy.sql import func
 import os
 from contextlib import contextmanager
 import uuid
@@ -22,6 +24,7 @@ import bcrypt
 Base = declarative_base()
 engine = create_async_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 @contextmanager
 def get_health_db_cursor():
@@ -47,15 +50,15 @@ class User(Base):
     # Primary fields
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     
-    # Authentication
-    name = Column(String(255), nullable=False)
-    email = Column(String(255), nullable=False, unique=True)
+    # RESTRICTED FIELDS - These cannot be edited from profile page
+    name = Column(String(255), nullable=False)  # READONLY
+    email = Column(String(255), unique=True, nullable=False)  # READONLY
+    age = Column(Integer, nullable=True)  # READONLY
+    gender = Column(String(50), nullable=True)  # READONLY
+
     password = Column(String(255), nullable=False)  # For Flutter
     password_hash = Column(String(255), nullable=True)  # For web (can be same as password)
     
-    # Physical characteristics
-    gender = Column(String(20), nullable=True)
-    age = Column(Integer, nullable=True)
     height = Column(Float, nullable=True)  # in cm
     weight = Column(Float, nullable=True)  # in kg
     activity_level = Column(String(100), nullable=True)
@@ -65,6 +68,14 @@ class User(Base):
     bmr = Column(Float, nullable=True)
     tdee = Column(Float, nullable=True)
     
+    # Reproductive health fields
+    has_periods = Column(Boolean, nullable=True)
+    last_period_date = Column(DateTime, nullable=True)
+    cycle_length = Column(Integer, nullable=True)
+    cycle_length_regular = Column(Boolean, nullable=True)
+    pregnancy_status = Column(String(50), nullable=True)
+    period_tracking_preference = Column(String(50), nullable=True)
+
     # Goals and preferences
     primary_goal = Column(String(100), nullable=True)
     fitness_goal = Column(String(100), nullable=True)  # Web frontend compatibility
@@ -98,10 +109,6 @@ class User(Base):
     physical_stats = Column(JSONB, nullable=True)
     preferences = Column(JSONB, nullable=True)
     
-    # # Legacy fields for web frontend compatibility
-    # fitnessGoal = Column(String(255), nullable=True)  # Maps to fitness_goal
-    # dietaryPreferences = Column(ARRAY(String), nullable=True)  # Maps to dietary_preferences
-    
     # Metadata
     created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
     updated_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
@@ -110,6 +117,14 @@ class User(Base):
     # Additional timestamps for web frontend compatibility
     createdAt = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
     updatedAt = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
+    # Define which fields are readonly (cannot be updated via profile)
+    READONLY_FIELDS = {'name', 'email', 'age', 'gender', 'password_hash', 'id', 'created_at'}
+    
+    def get_editable_fields(self):
+        """Return list of fields that can be edited from profile page"""
+        all_fields = set(self.__table__.columns.keys())
+        return all_fields - self.READONLY_FIELDS
 
 class Conversation(Base):
     """Database model for storing user conversations."""
@@ -139,13 +154,22 @@ class UserNotes(Base):
 # Password hashing utilities
 def hash_password(password: str) -> str:
     """Hash a password for storing in database"""
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+    return pwd_context.hash(password)
 
 def verify_password(password: str, hashed_password: str) -> bool:
     """Verify a password against its hash"""
-    return bcrypt.checkpw(password.encode('utf-8'), hashed_password.encode('utf-8'))
+    return pwd_context.verify(password, hashed_password)
 
+def parse_date_string(date_str):
+    """Parse date string in ISO format"""
+    if not date_str:
+        return None
+    
+    try:
+        # Parse ISO format date (e.g., "2024-01-15")
+        return datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
 
 def parse_time_string(time_str):
     """Parse time string in either 12-hour or 24-hour format"""
@@ -180,15 +204,26 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
     """Create a new user from onboarding data (works for both web and Flutter)"""
     async with SessionLocal() as session:
         try:
-            # Extract data from onboarding structure
+            print("🔍 DEBUGGING USER CREATION:")
+            print(f"📧 Email: {onboarding_data.get('basicInfo', {}).get('email')}")
+            
+            # Extract basic info
             basic_info = onboarding_data.get('basicInfo', {})
+            period_cycle = onboarding_data.get('periodCycle', {})
+            
+            # ADD THIS DEBUGGING
+            print(f"🌸 Period cycle data in create_user_from_onboarding:")
+            print(f"  period_cycle dict: {period_cycle}")
+            print(f"  hasPeriods: {period_cycle.get('hasPeriods')}")
+            print(f"  lastPeriodDate: {period_cycle.get('lastPeriodDate')}")
+            print(f"  cycleLength: {period_cycle.get('cycleLength')}")
+
             primary_goal = onboarding_data.get('primaryGoal', '')
             weight_goal_data = onboarding_data.get('weightGoal', {})
             sleep_info = onboarding_data.get('sleepInfo', {})
             dietary_prefs = onboarding_data.get('dietaryPreferences', {})
             workout_prefs = onboarding_data.get('workoutPreferences', {})
             exercise_setup = onboarding_data.get('exerciseSetup', {})
-            
 
             bedtime_raw = sleep_info.get('bedtime', '')
             wakeup_time_raw = sleep_info.get('wakeupTime', '')
@@ -204,56 +239,97 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
             # Hash the password
             hashed_password = hash_password(basic_info.get('password', ''))
             
+
+            has_periods = None
+            last_period_date = None
+            cycle_length = None
+            cycle_length_regular = None
+            pregnancy_status = None
+            period_tracking_preference = None
+            
+            if period_cycle:
+                has_periods = period_cycle.get('hasPeriods')
+                last_period_date_str = period_cycle.get('lastPeriodDate')
+                cycle_length = period_cycle.get('cycleLength')
+                cycle_length_regular = period_cycle.get('cycleLengthRegular')
+                pregnancy_status = period_cycle.get('pregnancyStatus')
+                period_tracking_preference = period_cycle.get('trackingPreference')
+                
+                # Parse last period date if provided
+                if last_period_date_str:
+                    try:
+                        last_period_date = datetime.datetime.fromisoformat(last_period_date_str.replace('Z', '+00:00'))
+                        print(f"✅ Parsed last period date: {last_period_date}")
+                    except:
+                        print(f"❌ Failed to parse last period date: {last_period_date_str}")
+                        last_period_date = None
+                
+                print(f"🌸 Processed period data:")
+                print(f"  has_periods: {has_periods}")
+                print(f"  last_period_date: {last_period_date}")
+                print(f"  cycle_length: {cycle_length}")
+                print(f"  cycle_length_regular: {cycle_length_regular}")
+                print(f"  pregnancy_status: {pregnancy_status}")
+                print(f"  period_tracking_preference: {period_tracking_preference}")
+
+
             # Create new user with SNAKE_CASE field names (matching your User model)
-            user_id = uuid.uuid4()
             new_user = User(
-                id=user_id,
+                id=uuid.uuid4(),
                 name=basic_info.get('name', ''),
                 email=basic_info.get('email', ''),
                 password=hashed_password,
-                password_hash=hashed_password,  # Same for both fields
+                password_hash=hashed_password,  
                 
-                # Physical characteristics - use snake_case
+                # Physical characteristics
                 gender=basic_info.get('gender', ''),
                 age=basic_info.get('age', 0),
                 height=basic_info.get('height', 0.0),
                 weight=basic_info.get('weight', 0.0),
-                activity_level=basic_info.get('activityLevel', ''),  # camelCase input -> snake_case field
+                activity_level=basic_info.get('activityLevel', ''),  
                 
-                # Health metrics - use snake_case
+                # Health metrics
                 bmi=basic_info.get('bmi', 0.0),
                 bmr=basic_info.get('bmr', 0.0),
                 tdee=basic_info.get('tdee', 0.0),
                 
-                # Goals - use snake_case
+                # Period Cycle
+                has_periods=period_cycle.get('hasPeriods', None),
+                last_period_date=parse_date_string(period_cycle.get('lastPeriodDate', '')),
+                cycle_length=period_cycle.get('cycleLength', None),
+                cycle_length_regular=period_cycle.get('cycleLengthRegular', None),
+                pregnancy_status=period_cycle.get('pregnancyStatus', None),
+                period_tracking_preference=period_cycle.get('trackingPreference', None),
+
+                # Goals
                 primary_goal=primary_goal,
-                fitness_goal=primary_goal,  # Map to snake_case
-                weight_goal=weight_goal_data.get('weightGoal', ''),  # camelCase input -> snake_case field
-                target_weight=weight_goal_data.get('targetWeight', 0.0),  # camelCase input -> snake_case field
-                goal_timeline=weight_goal_data.get('timeline', ''),  # camelCase input -> snake_case field
+                fitness_goal=primary_goal,  
+                weight_goal=weight_goal_data.get('weightGoal', ''),  
+                target_weight=weight_goal_data.get('targetWeight', 0.0),  
+                goal_timeline=weight_goal_data.get('timeline', ''),  
                 
-                # Sleep - use snake_case
-                sleep_hours=sleep_info.get('sleepHours', 7.0),  # camelCase input -> snake_case field
+                # Sleep
+                sleep_hours=sleep_info.get('sleepHours', 8.0),  
                 bedtime=bedtime_parsed,
                 wakeup_time=wakeup_time_parsed,
-                sleep_issues=sleep_info.get('sleepIssues', []),  # camelCase input -> snake_case field
+                sleep_issues=sleep_info.get('sleepIssues', []),  
                 
-                # Nutrition - use snake_case
-                dietary_preferences=dietary_prefs.get('dietaryPreferences', []),  # camelCase input -> snake_case field
-                water_intake=dietary_prefs.get('waterIntake', 2.0),  # camelCase input -> snake_case field
-                medical_conditions=dietary_prefs.get('medicalConditions', []),  # camelCase input -> snake_case field
-                other_medical_condition=dietary_prefs.get('otherCondition', ''),  # camelCase input -> snake_case field
+                # Nutrition
+                dietary_preferences=dietary_prefs.get('dietaryPreferences', []),  
+                water_intake=dietary_prefs.get('waterIntake', 2.0),  
+                medical_conditions=dietary_prefs.get('medicalConditions', []),  
+                other_medical_condition=dietary_prefs.get('otherCondition', ''), 
                 
-                # Exercise - use snake_case
-                preferred_workouts=workout_prefs.get('workoutTypes', []),  # camelCase input -> snake_case field
+                # Exercise
+                preferred_workouts=workout_prefs.get('workoutTypes', []), 
                 workout_frequency=workout_prefs.get('frequency', 3),
                 workout_duration=workout_prefs.get('duration', 30),
-                workout_location=exercise_setup.get('workoutLocation', ''),  # camelCase input -> snake_case field
-                available_equipment=exercise_setup.get('equipment', []),  # camelCase input -> snake_case field
-                fitness_level=exercise_setup.get('fitnessLevel', 'Beginner'),  # camelCase input -> snake_case field
-                has_trainer=exercise_setup.get('hasTrainer', False),  # camelCase input -> snake_case field
+                workout_location=exercise_setup.get('workoutLocation', ''), 
+                available_equipment=exercise_setup.get('equipment', []), 
+                fitness_level=exercise_setup.get('fitnessLevel', 'Beginner'), 
+                has_trainer=exercise_setup.get('hasTrainer', False), 
                 
-                # Web frontend compatibility - use snake_case
+                # Web frontend compatibility
                 health_metrics={
                     'bmi': basic_info.get('bmi', 0.0),
                     'bmr': basic_info.get('bmr', 0.0),
@@ -267,11 +343,18 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
                     'activityLevel': basic_info.get('activityLevel', '')
                 }
             )
-            
+
+            print(f"👤 Created user object with period data:")
+            print(f"  user.has_periods: {new_user.has_periods}")
+            print(f"  user.last_period_date: {new_user.last_period_date}")
+            print(f"  user.cycle_length: {new_user.cycle_length}")
+
             session.add(new_user)
             await session.commit()
+            await session.refresh(new_user)
             
-            return str(user_id)
+            print(f"✅ User created successfully with ID: {new_user.id}")
+            return str(new_user.id)
             
         except Exception as e:
             await session.rollback()
@@ -306,7 +389,6 @@ async def get_user_by_id(user_id: str):
             print(f"Error fetching user by ID: {e}")
             return None
 
-# Update the existing functions...
 async def get_user_conversation(user_id: str):
     """
     Retrieve the conversation history for a specific user.
@@ -493,6 +575,20 @@ async def get_user_profile(user_id: str):
                 "bmr": user.bmr,
                 "tdee": user.tdee,
                 
+                # Reproductive health fields
+                "hasPeriods": user.has_periods,
+                "has_periods": user.has_periods,
+                "lastPeriodDate": user.last_period_date,  
+                "last_period_date": user.last_period_date,
+                "cycleLength": user.cycle_length,
+                "cycle_length": user.cycle_length,
+                "cycleLengthRegular": user.cycle_length_regular,
+                "cycle_length_regular": user.cycle_length_regular,
+                "pregnancyStatus": user.pregnancy_status,
+                "pregnancy_status": user.pregnancy_status,
+                "periodTrackingPreference": user.period_tracking_preference,
+                "period_tracking_preference": user.period_tracking_preference,
+
                 # Goals
                 "primaryGoal": user.primary_goal,
                 "fitnessGoal": user.fitness_goal or user.primary_goal,
