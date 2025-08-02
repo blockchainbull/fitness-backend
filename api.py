@@ -12,7 +12,7 @@ from sqlalchemy import select
 from passlib.context import CryptContext
 import traceback
 from datetime import datetime, timezone
-from database import User
+from database import User, hash_password
 
 
 router = APIRouter()
@@ -187,7 +187,8 @@ async def login_user(login_data: LoginRequest):
     """Login endpoint for both web and Flutter applications"""
     try:
         print(f"🔐 Login attempt for email: {login_data.email}")
-        
+        print(f"🔐 Password provided length: {len(login_data.password)}")
+
         # Get user by email
         user = await get_user_by_email(login_data.email)
         
@@ -212,9 +213,19 @@ async def login_user(login_data: LoginRequest):
                 detail="Invalid credentials"
             )
         
+        print(f"🔍 Using password hash: {password_to_verify[:20]}...")
+
+        verification_result = verify_password(login_data.password, password_to_verify)
+        print(f"🧪 Password verification result: {verification_result}")
+
         # Verify password
-        if not verify_password(login_data.password, password_to_verify):
+        if not verification_result:
             print(f"❌ Password verification failed for: {login_data.email}")
+
+            for test_pwd in ['defaultpassword123', '', 'password']:
+                test_result = verify_password(test_pwd, password_to_verify)
+                print(f"🧪 Test password '{test_pwd}': {test_result}")
+                
             raise HTTPException(
                 status_code=401,
                 detail="Invalid credentials"
@@ -556,7 +567,7 @@ async def update_user_password(user_id: str, password_data: dict):
                 )
             
             # Hash new password with passlib (same as login system)
-            new_password_hash = get_password_hash(new_password)
+            new_password_hash = hash_password(new_password)
             
             # Update both password fields for compatibility
             user.password = new_password_hash

@@ -5,9 +5,8 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from config import DATABASE_URL
 from sqlalchemy.ext.mutable import MutableList
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, Index, select, update, text, Boolean, TIMESTAMP, UUID
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, select, update, Boolean, TIMESTAMP, UUID
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
-from sqlalchemy.orm import relationship
 import psycopg2
 from passlib.context import CryptContext
 from psycopg2.extras import RealDictCursor
@@ -17,8 +16,6 @@ from contextlib import contextmanager
 import uuid
 import datetime
 import traceback
-import json
-import bcrypt
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -126,6 +123,103 @@ class User(Base):
         all_fields = set(self.__table__.columns.keys())
         return all_fields - self.READONLY_FIELDS
 
+class DailySteps(Base):
+    """Daily step tracking"""
+    __tablename__ = "daily_steps"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    steps = Column(Integer, default=0)
+    calories_burned = Column(Float, default=0.0)
+    distance_km = Column(Float, default=0.0)
+    active_minutes = Column(Integer, default=0)
+    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
+class DailyNutrition(Base):
+    """Daily nutrition tracking"""
+    __tablename__ = "daily_nutrition"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    calories_consumed = Column(Float, default=0.0)
+    protein_g = Column(Float, default=0.0)
+    carbs_g = Column(Float, default=0.0)
+    fat_g = Column(Float, default=0.0)
+    water_liters = Column(Float, default=0.0)
+    meals_logged = Column(Integer, default=0)
+    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
+class DailySleep(Base):
+    """Daily sleep tracking"""
+    __tablename__ = "daily_sleep"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    bedtime = Column(DateTime)
+    wake_time = Column(DateTime)
+    total_hours = Column(Float, default=0.0)
+    quality_score = Column(Float, default=0.0)  # 0-10 scale
+    deep_sleep_hours = Column(Float, default=0.0)
+    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
+class DailyWeight(Base):
+    """Daily weight tracking"""
+    __tablename__ = "daily_weight"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    weight_kg = Column(Float, nullable=False)
+    body_fat_percentage = Column(Float)
+    muscle_mass_kg = Column(Float)
+    notes = Column(String(500))
+    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
+class WorkoutSessions(Base):
+    """Workout session tracking"""
+    __tablename__ = "workout_sessions"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    workout_type = Column(String(100))  # "Upper Body", "Cardio", etc.
+    duration_minutes = Column(Integer)
+    calories_burned = Column(Float)
+    intensity = Column(String(20))  # "Low", "Medium", "High"
+    notes = Column(String(1000))
+    exercises = Column(JSONB)  # Store exercise details as JSON
+    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
+class PeriodTracking(Base):
+    """Period tracking for female users"""
+    __tablename__ = "period_tracking"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime)
+    flow_intensity = Column(String(20))  # "Light", "Medium", "Heavy"
+    symptoms = Column(ARRAY(String))  # ["cramps", "headache", etc.]
+    mood = Column(String(20))
+    notes = Column(String(500))
+    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
+class SupplementTracking(Base):
+    """Daily supplement tracking"""
+    __tablename__ = "supplement_tracking"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    supplement_name = Column(String(100), nullable=False)
+    dosage = Column(String(50))
+    taken = Column(Boolean, default=False)
+    time_taken = Column(DateTime)
+    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+
 class Conversation(Base):
     """Database model for storing user conversations."""
     __tablename__ = "conversations"
@@ -209,6 +303,21 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
             
             # Extract basic info
             basic_info = onboarding_data.get('basicInfo', {})
+
+            raw_password = basic_info.get('password','defaultpassword123')
+
+            if not raw_password or raw_password.strip() == '':
+                raw_password = 'defaultpassword123'
+            
+            print(f"🔐 DEBUGGING PASSWORD CREATION:")
+            print(f"  Raw password received: '{raw_password}'")
+            print(f"  Password length: {len(raw_password)}")
+
+            hashed_password = hash_password(raw_password)
+
+            print(f"  Hashed password length: {len(hashed_password)}")
+            print(f"  Hashed password starts with: {hashed_password[:10]}...")
+
             period_cycle = onboarding_data.get('periodCycle', {})
             
             # ADD THIS DEBUGGING
@@ -234,10 +343,6 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
             print(f"🕐 Time parsing:")
             print(f"  Raw bedtime: '{bedtime_raw}' -> Parsed: '{bedtime_parsed}'")
             print(f"  Raw wakeup: '{wakeup_time_raw}' -> Parsed: '{wakeup_time_parsed}'")
-
-
-            # Hash the password
-            hashed_password = hash_password(basic_info.get('password', ''))
             
 
             has_periods = None
@@ -343,6 +448,8 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
                     'activityLevel': basic_info.get('activityLevel', '')
                 }
             )
+
+            test_verify = verify_password(raw_password, hashed_password)
 
             print(f"👤 Created user object with period data:")
             print(f"  user.has_periods: {new_user.has_periods}")
