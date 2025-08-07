@@ -37,6 +37,10 @@ def get_health_db_cursor():
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         yield conn, cursor
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         cursor.close()
         conn.close()
@@ -222,6 +226,21 @@ class SupplementTracking(Base):
     taken = Column(Boolean, default=False)
     time_taken = Column(DateTime)
     created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)) 
+
+class UserSupplementPreferences(Base):
+    """User supplement preferences and setup"""
+    __tablename__ = "user_supplement_preferences"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    supplement_name = Column(String(100), nullable=False)
+    dosage = Column(String(50))
+    frequency = Column(String(50), default='Daily')
+    preferred_time = Column(String(10), default='9:00 AM')
+    notes = Column(String(500))
+    is_active = Column(Boolean, default=True)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class Conversation(Base):
     """Database model for storing user conversations."""

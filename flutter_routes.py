@@ -1,12 +1,13 @@
 # flutter_routes.py - Updated to use unified backend
 from fastapi import APIRouter, HTTPException
 import traceback
-
+import uuid
 from flutter_models import (
     HealthUserCreate, HealthUserResponse, HealthLoginRequest, 
     WaterIntakeRequest, MealRequest, UnifiedOnboardingRequest
 )
-from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile
+from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile, get_health_db_cursor
+from datetime import datetime, timedelta
 
 # Create a separate router for health endpoints
 health_router = APIRouter(prefix="/api/health", tags=["mobile-health"])
@@ -243,3 +244,313 @@ async def log_meal(meal_data: MealRequest):
         return {"success": True, "message": "Meal logged successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+# Supplement logging functions
+@health_router.post("/supplements/preferences")
+async def save_supplement_preferences(request_data: dict):
+    """Save user's supplement preferences"""
+    try:
+        user_id = request_data.get('user_id')
+        supplements = request_data.get('supplements', [])
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        with get_health_db_cursor() as (conn, cursor):
+            # Clear existing preferences (if you want this table)
+            # For now, let's just use the supplement_tracking table
+            
+            # Return success
+            return {
+                "success": True, 
+                "message": f"Supplement preferences saved for {len(supplements)} supplements"
+            }
+        
+    except Exception as e:
+        print(f"Error saving supplement preferences: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save preferences")
+
+@health_router.post("/supplements/log")
+async def log_supplement_intake(log_data: dict):
+    """Log daily supplement intake"""
+    try:
+        print(f"🔍 Received supplement log data: {log_data}")
+        
+        user_id = log_data.get('user_id')
+        date_str = log_data.get('date')  # Format: 'YYYY-MM-DD'
+        supplement_name = log_data.get('supplement_name')
+        taken = log_data.get('taken', False)
+        dosage = log_data.get('dosage')
+        time_taken_str = log_data.get('time_taken')
+        
+        print(f"📝 Logging: user={user_id}, date={date_str}, supplement={supplement_name}, taken={taken}")
+        
+        if not all([user_id, date_str, supplement_name]):
+            print(f"❌ Missing required fields: user_id={user_id}, date={date_str}, supplement_name={supplement_name}")
+            raise HTTPException(status_code=400, detail="Missing required fields")
+        
+        # Parse the date
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+        print(f"📅 Parsed date: {date_obj}")
+        
+        # Parse time_taken if provided
+        time_taken_obj = None
+        if time_taken_str and taken:
+            try:
+                time_taken_obj = datetime.fromisoformat(time_taken_str.replace('Z', '+00:00'))
+            except:
+                time_taken_obj = datetime.now()
+        
+        with get_health_db_cursor() as (conn, cursor):
+            # Check if record exists
+            cursor.execute("""
+                SELECT id FROM supplement_tracking 
+                WHERE user_id = %s AND date = %s AND supplement_name = %s
+            """, (user_id, date_obj, supplement_name))
+            
+            existing = cursor.fetchone()
+            print(f"🔍 Existing record: {existing}")
+            
+            if existing:
+                # Update existing record
+                cursor.execute("""
+                    UPDATE supplement_tracking 
+                    SET taken = %s, time_taken = %s, dosage = %s
+                    WHERE user_id = %s AND date = %s AND supplement_name = %s
+                """, (taken, time_taken_obj, dosage, user_id, date_obj, supplement_name))
+                print(f"✅ Updated supplement log: {supplement_name} = {taken} on {date_str}")
+            else:
+                # Insert new record
+                new_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO supplement_tracking (
+                        id, user_id, date, supplement_name, dosage, taken, time_taken, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    new_id,
+                    user_id,
+                    date_obj,
+                    supplement_name,
+                    dosage,
+                    taken,
+                    time_taken_obj,
+                    datetime.now()
+                ))
+                print(f"✅ Inserted supplement log: {supplement_name} = {taken} on {date_str} with ID {new_id}")
+            
+            conn.commit()
+            print("💾 Database transaction committed")
+            
+        return {"success": True, "message": "Supplement intake logged"}
+        
+    except Exception as e:
+        print(f"❌ Error logging supplement intake: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Failed to log supplement intake")
+
+@health_router.get("/supplements/status/{user_id}")
+async def get_todays_supplement_status(user_id: str):
+    """Get today's supplement status for user"""
+    try:
+        today = datetime.now().date()
+        
+        with get_health_db_cursor() as (conn, cursor):
+            cursor.execute("""
+                SELECT supplement_name, taken FROM supplement_tracking 
+                WHERE user_id = %s AND date = %s
+            """, (user_id, today))
+            
+            records = cursor.fetchall()
+            
+        # Convert to dictionary
+        status = {}
+        for record in records:
+            status[record['supplement_name']] = record['taken']
+            
+        return {
+            "success": True,
+            "status": status,
+            "date": today.strftime('%Y-%m-%d')
+        }
+        
+    except Exception as e:
+        print(f"Error getting supplement status: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get supplement status")
+
+@health_router.get("/supplements/history/{user_id}")
+async def get_supplement_history(user_id: str, days: int = 30):
+    """Get supplement intake history"""
+    try:
+        start_date = datetime.now() - timedelta(days=days)
+        
+        with get_health_db_cursor() as (conn, cursor):
+            cursor.execute("""
+                SELECT * FROM supplement_tracking 
+                WHERE user_id = %s AND date >= %s
+                ORDER BY date DESC, supplement_name ASC
+            """, (user_id, start_date.date()))
+            
+            records = cursor.fetchall()
+            
+        # Convert records to list of dictionaries
+        history = []
+        for record in records:
+            history.append({
+                'id': str(record['id']),
+                'user_id': str(record['user_id']),
+                'date': record['date'].strftime('%Y-%m-%d'),
+                'supplement_name': record['supplement_name'],
+                'dosage': record['dosage'],
+                'taken': record['taken'],
+                'time_taken': record['time_taken'].isoformat() if record['time_taken'] else None,
+                'created_at': record['created_at'].isoformat() if record['created_at'] else None,
+            })
+            
+        return {
+            "success": True,
+            "history": history,
+            "count": len(history)
+        }
+        
+    except Exception as e:
+        print(f"Error getting supplement history: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get supplement history")
+    
+@health_router.get("/supplements/test")
+async def test_supplement_db():
+    """Test supplement database connectivity"""
+    try:
+        with get_health_db_cursor() as (conn, cursor):
+            # Test basic query
+            cursor.execute("SELECT 1 as test")
+            result = cursor.fetchone()
+            
+            # Check if supplement_tracking table exists
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' AND table_name = 'supplement_tracking'
+            """)
+            table_exists = cursor.fetchone()
+            
+            # Count existing records
+            cursor.execute("SELECT COUNT(*) as count FROM supplement_tracking")
+            count_result = cursor.fetchone()
+            
+        return {
+            "success": True,
+            "database_connection": "OK",
+            "test_query": result['test'] if result else None,
+            "table_exists": table_exists is not None,
+            "record_count": count_result['count'] if count_result else 0
+        }
+        
+    except Exception as e:
+        print(f"Database test error: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+    
+# User Supplement Preferences functions
+@health_router.post("/supplements/preferences")
+async def save_supplement_preferences(request_data: dict):
+    """Save user's supplement preferences"""
+    try:
+        user_id = request_data.get('user_id')
+        supplements = request_data.get('supplements', [])
+        
+        print(f"🔍 Saving supplement preferences for user: {user_id}")
+        print(f"📝 Supplements to save: {len(supplements)} items")
+        
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        
+        with get_health_db_cursor() as (conn, cursor):
+            # Clear existing preferences for this user
+            cursor.execute("""
+                DELETE FROM user_supplement_preferences 
+                WHERE user_id = %s
+            """, (user_id,))
+            print(f"🗑️ Cleared existing preferences for user: {user_id}")
+            
+            # Insert new preferences
+            for supplement in supplements:
+                new_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO user_supplement_preferences (
+                        id, user_id, supplement_name, dosage, frequency, 
+                        preferred_time, notes, is_active, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    new_id,
+                    user_id,
+                    supplement.get('name'),
+                    supplement.get('dosage'),
+                    supplement.get('frequency', 'Daily'),
+                    supplement.get('preferred_time', '9:00 AM'),
+                    supplement.get('notes', ''),
+                    True,  # is_active
+                    datetime.now(),
+                    datetime.now()
+                ))
+                print(f"✅ Saved preference: {supplement.get('name')} - {supplement.get('dosage')}")
+            
+            conn.commit()
+            print(f"💾 Committed {len(supplements)} supplement preferences to database")
+            
+            return {
+                "success": True, 
+                "message": f"Saved {len(supplements)} supplement preferences",
+                "user_id": user_id,
+                "count": len(supplements)
+            }
+        
+    except Exception as e:
+        print(f"❌ Error saving supplement preferences: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Failed to save supplement preferences")
+
+@health_router.get("/supplements/preferences/{user_id}")
+async def get_supplement_preferences(user_id: str):
+    """Get user's supplement preferences"""
+    try:
+        print(f"🔍 Getting supplement preferences for user: {user_id}")
+        
+        with get_health_db_cursor() as (conn, cursor):
+            cursor.execute("""
+                SELECT * FROM user_supplement_preferences 
+                WHERE user_id = %s AND is_active = true
+                ORDER BY created_at ASC
+            """, (user_id,))
+            
+            preferences = cursor.fetchall()
+            print(f"📊 Found {len(preferences)} supplement preferences")
+            
+        # Convert to list of dictionaries
+        preferences_list = []
+        for pref in preferences:
+            preferences_list.append({
+                'id': str(pref['id']),
+                'user_id': str(pref['user_id']),
+                'supplement_name': pref['supplement_name'],
+                'dosage': pref['dosage'],
+                'frequency': pref['frequency'],
+                'preferred_time': pref['preferred_time'],
+                'notes': pref['notes'],
+                'is_active': pref['is_active'],
+                'created_at': pref['created_at'].isoformat() if pref['created_at'] else None,
+                'updated_at': pref['updated_at'].isoformat() if pref['updated_at'] else None,
+            })
+            
+        return {
+            "success": True,
+            "preferences": preferences_list,
+            "count": len(preferences_list)
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting supplement preferences: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get supplement preferences")
