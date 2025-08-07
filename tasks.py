@@ -1,7 +1,6 @@
 """
 Background task processing for FitMind AI.
 """
-# tasks.py
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 

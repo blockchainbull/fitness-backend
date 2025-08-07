@@ -2,7 +2,6 @@
 Main application entry point for the nutrition and exercise coach API.
 Updated to support both web and Flutter applications with unified backend.
 """
-import silence_sqlalchemy
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from fastapi import FastAPI
@@ -15,7 +14,6 @@ from tasks import start_background_worker
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import text, select
 from flutter_routes import health_router  # Flutter-specific routes
-import bcrypt
 
 # SQLAlchemy setup
 Base = declarative_base()

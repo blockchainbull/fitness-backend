@@ -6,7 +6,6 @@ from utils import format_response_as_html
 from database import get_user_conversation, append_to_user_conversation, get_user_profile, get_user_notes, add_or_update_user_note
 from tasks import queue_task
 import json
-import uuid
 import traceback
 
 

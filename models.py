@@ -2,7 +2,7 @@
 Pydantic models for request and response validation.
 """
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 
 
 class PromptRequest(BaseModel):
@@ -18,7 +18,7 @@ class ConversationEntry(BaseModel):
     """
     Model for individual conversation messages.
     """
-    role: str  # "user" or "assistant"
+    role: str  
     content: str
     timestamp: str
 

@@ -2,20 +2,21 @@
 Updated unified database models for both web and Flutter applications.
 """
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
 from config import DATABASE_URL
 from sqlalchemy.ext.mutable import MutableList
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, UniqueConstraint, select, update, Boolean, TIMESTAMP, UUID
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
-import psycopg2
 from passlib.context import CryptContext
 from psycopg2.extras import RealDictCursor
-from sqlalchemy.sql import func
-import os
 from contextlib import contextmanager
+from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime, timezone, timedelta
+import os
+import psycopg2
 import uuid
-import datetime
 import traceback
+
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -58,6 +59,8 @@ class User(Base):
     
     height = Column(Float, nullable=True)  # in cm
     weight = Column(Float, nullable=True)  # in kg
+    starting_weight = Column(Float)
+    starting_weight_date = Column(TIMESTAMP(timezone=True))
     activity_level = Column(String(100), nullable=True)
     
     # Calculated health metrics
@@ -107,13 +110,13 @@ class User(Base):
     preferences = Column(JSONB, nullable=True)
     
     # Metadata
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
-    updated_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     version = Column(Integer, default=0)
     
     # Additional timestamps for web frontend compatibility
-    createdAt = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
-    updatedAt = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    createdAt = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updatedAt = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     # Define which fields are readonly (cannot be updated via profile)
     READONLY_FIELDS = {'name', 'email', 'age', 'gender', 'password_hash', 'id', 'created_at'}
@@ -134,7 +137,7 @@ class DailySteps(Base):
     calories_burned = Column(Float, default=0.0)
     distance_km = Column(Float, default=0.0)
     active_minutes = Column(Integer, default=0)
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))  
 
 class DailyNutrition(Base):
     """Daily nutrition tracking"""
@@ -149,7 +152,7 @@ class DailyNutrition(Base):
     fat_g = Column(Float, default=0.0)
     water_liters = Column(Float, default=0.0)
     meals_logged = Column(Integer, default=0)
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)) 
 
 class DailySleep(Base):
     """Daily sleep tracking"""
@@ -161,9 +164,9 @@ class DailySleep(Base):
     bedtime = Column(DateTime)
     wake_time = Column(DateTime)
     total_hours = Column(Float, default=0.0)
-    quality_score = Column(Float, default=0.0)  # 0-10 scale
+    quality_score = Column(Float, default=0.0)
     deep_sleep_hours = Column(Float, default=0.0)
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class DailyWeight(Base):
     """Daily weight tracking"""
@@ -171,12 +174,12 @@ class DailyWeight(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    date = Column(DateTime, nullable=False)
+    date = Column(TIMESTAMP(timezone=True), nullable=False)
     weight_kg = Column(Float, nullable=False)
     body_fat_percentage = Column(Float)
     muscle_mass_kg = Column(Float)
     notes = Column(String(500))
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class WorkoutSessions(Base):
     """Workout session tracking"""
@@ -185,13 +188,13 @@ class WorkoutSessions(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     date = Column(DateTime, nullable=False)
-    workout_type = Column(String(100))  # "Upper Body", "Cardio", etc.
+    workout_type = Column(String(100))
     duration_minutes = Column(Integer)
     calories_burned = Column(Float)
-    intensity = Column(String(20))  # "Low", "Medium", "High"
+    intensity = Column(String(20))
     notes = Column(String(1000))
-    exercises = Column(JSONB)  # Store exercise details as JSON
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    exercises = Column(JSONB)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class PeriodTracking(Base):
     """Period tracking for female users"""
@@ -201,11 +204,11 @@ class PeriodTracking(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     start_date = Column(DateTime, nullable=False)
     end_date = Column(DateTime)
-    flow_intensity = Column(String(20))  # "Light", "Medium", "Heavy"
-    symptoms = Column(ARRAY(String))  # ["cramps", "headache", etc.]
+    flow_intensity = Column(String(20))
+    symptoms = Column(ARRAY(String))
     mood = Column(String(20))
     notes = Column(String(500))
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))  
 
 class SupplementTracking(Base):
     """Daily supplement tracking"""
@@ -218,16 +221,16 @@ class SupplementTracking(Base):
     dosage = Column(String(50))
     taken = Column(Boolean, default=False)
     time_taken = Column(DateTime)
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)) 
 
 class Conversation(Base):
     """Database model for storing user conversations."""
     __tablename__ = "conversations"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), index=True)  # Changed from userId to user_id
+    user_id = Column(UUID(as_uuid=True), index=True)
     conversation = Column(MutableList.as_mutable(JSONB), nullable=False, default=list)
-    created_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
-    updated_at = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))  
+    updated_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)) 
 
 class UserNotes(Base):
     """Database model for storing structured user notes."""
@@ -239,7 +242,7 @@ class UserNotes(Base):
     value = Column(String, nullable=False)
     confidence = Column(Float, default=0.5)
     source = Column(String(50), default="inferred")
-    timestamp = Column(TIMESTAMP(timezone=True), default=datetime.datetime.utcnow)
+    timestamp = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
     
     __table_args__ = (
         UniqueConstraint('user_id', 'key', name='user_notes_user_id_key_unique'),
@@ -261,7 +264,7 @@ def parse_date_string(date_str):
     
     try:
         # Parse ISO format date (e.g., "2024-01-15")
-        return datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return datetime.fromisoformat(date_str.replace('Z', '+00:00'))  # FIXED
     except (ValueError, AttributeError):
         return None
 
@@ -274,7 +277,7 @@ def parse_time_string(time_str):
     if 'AM' in time_str.upper() or 'PM' in time_str.upper():
         try:
             # Parse 12-hour format
-            time_obj = datetime.datetime.strptime(time_str, '%I:%M %p')
+            time_obj = datetime.strptime(time_str, '%I:%M %p')  # FIXED
             # Convert to 24-hour format for database
             return time_obj.strftime('%H:%M')
         except ValueError:
@@ -283,15 +286,13 @@ def parse_time_string(time_str):
     # Handle 24-hour format (e.g., "22:00")
     try:
         # Validate 24-hour format
-        datetime.datetime.strptime(time_str, '%H:%M')
+        datetime.strptime(time_str, '%H:%M')  # FIXED
         return time_str
     except ValueError:
         pass
     
     # Return empty string if parsing fails
     return ''
-
-
 
 # Updated user creation function for onboarding
 async def create_user_from_onboarding(onboarding_data: dict) -> str:
@@ -363,7 +364,7 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
                 # Parse last period date if provided
                 if last_period_date_str:
                     try:
-                        last_period_date = datetime.datetime.fromisoformat(last_period_date_str.replace('Z', '+00:00'))
+                        last_period_date = datetime.fromisoformat(last_period_date_str.replace('Z', '+00:00'))
                         print(f"✅ Parsed last period date: {last_period_date}")
                     except:
                         print(f"❌ Failed to parse last period date: {last_period_date_str}")
@@ -391,6 +392,8 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
                 age=basic_info.get('age', 0),
                 height=basic_info.get('height', 0.0),
                 weight=basic_info.get('weight', 0.0),
+                starting_weight=basic_info.get('weight', 0.0),
+                starting_weight_date=datetime.now(timezone.utc),
                 activity_level=basic_info.get('activityLevel', ''),  
                 
                 # Health metrics
@@ -556,7 +559,7 @@ async def append_to_user_conversation(user_id: str, user_message: str, agent_mes
     """
     Add new user and agent messages to the conversation history.
     """
-    now = datetime.datetime.utcnow().isoformat()  # Format timestamp in ISO 8601 format
+    now = datetime.now(timezone.utc).isoformat()
 
     # Create new conversation entries for the user and assistant
     user_message_entry = {
@@ -786,8 +789,8 @@ async def init_database():
                             fitness_goal="generalFitness",
                             primary_goal="generalFitness",
                             dietary_preferences=[],
-                            created_at=datetime.datetime.utcnow(),
-                            updated_at=datetime.datetime.utcnow()
+                            created_at=datetime.now(timezone.utc),
+                            updated_at=datetime.now(timezone.utc)
                         )
                         session.add(new_user)
                         await session.flush()
@@ -856,7 +859,7 @@ async def add_or_update_user_note(
                         confidence=confidence,
                         source=source,
                         category=category,
-                        timestamp=datetime.datetime.utcnow()
+                        timestamp=datetime.now(timezone.utc)
                     )
                 )
             else:

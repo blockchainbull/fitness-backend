@@ -2,7 +2,6 @@
 Configuration settings for the nutrition and exercise coach API.
 """
 import os
-import logging
 from dotenv import load_dotenv
 from openai import OpenAI
 

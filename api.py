@@ -4,15 +4,16 @@ API routes for the nutrition and exercise coach application.
 from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, Dict, Any
-from models import PromptRequest, ConversationResponse
+from models import PromptRequest
 from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile, SessionLocal
 from agent import get_agent_response
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from passlib.context import CryptContext
+import uuid
 import traceback
-from datetime import datetime, timezone
-from database import User, hash_password
+from datetime import datetime, timezone, timedelta
+from database import User, hash_password, DailyWeight
 
 
 router = APIRouter()
@@ -75,7 +76,6 @@ class UserResponse(BaseModel):
     class Config:
         from_attributes = True
 
-
 class OnboardingCompleteRequest(BaseModel):
     basicInfo: Optional[Dict[str, Any]] = {}
     primaryGoal: Optional[str] = ""
@@ -101,9 +101,56 @@ class LoginResponse(BaseModel):
     message: Optional[str] = None
     error: Optional[str] = None
 
+class WeightEntryCreate(BaseModel):
+    user_id: str
+    date: str  # ISO format
+    weight: float
+    notes: Optional[str] = None
+    body_fat_percentage: Optional[float] = None
+    muscle_mass_kg: Optional[float] = None
+
+class WeightEntryResponse(BaseModel):
+    id: str
+    user_id: str
+    date: str
+    weight: float
+    notes: Optional[str]
+    body_fat_percentage: Optional[float]
+    muscle_mass_kg: Optional[float]
+    created_at: str
+
+class WeightUpdateRequest(BaseModel):
+    weight: float
+
+
 async def get_db():
     async with SessionLocal() as session:
-        yield session
+        try:
+            yield session
+        finally:
+            await session.close()
+
+def make_timezone_aware(dt):
+    """Convert a timezone-naive datetime to timezone-aware (UTC)"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+def safe_datetime_subtract(dt1, dt2):
+    """Safely subtract two datetimes, handling timezone differences"""
+    try:
+        # Make both datetimes timezone-aware
+        dt1_aware = make_timezone_aware(dt1)
+        dt2_aware = make_timezone_aware(dt2)
+        
+        if dt1_aware and dt2_aware:
+            return (dt1_aware - dt2_aware).days
+        return 0
+    except Exception as e:
+        print(f"⚠️ Error in datetime subtraction: {e}")
+        return 0
 
 def calculate_health_metrics(height: float, weight: float, age: int, gender: str, activity_level: str) -> dict:
     """Calculate BMI, BMR, and TDEE"""
@@ -664,3 +711,421 @@ async def get_user_profile_route(user_id: str, db: Session = Depends(get_db)):
             detail="Internal server error"
         )
     
+# Weight Logging API endpoints
+@router.post("/api/health/weight")
+async def save_weight_entry(weight_data: WeightEntryCreate, db: Session = Depends(get_db)):
+    """Save a new weight entry"""
+    try:
+        print(f"💾 Saving weight entry: {weight_data.weight} kg for user {weight_data.user_id}")
+        print(f"📅 Date: {weight_data.date}")
+        
+        # Parse the date string and ensure it's timezone-aware
+        try:
+            entry_date = datetime.fromisoformat(weight_data.date.replace('Z', '+00:00'))
+            if entry_date.tzinfo is None:
+                entry_date = entry_date.replace(tzinfo=timezone.utc)
+        except ValueError as ve:
+            print(f"⚠️ Date parsing error: {ve}, using current time")
+            entry_date = datetime.now(timezone.utc)
+        
+        print(f"📅 Parsed date: {entry_date}")
+        
+        # Create new DailyWeight entry
+        daily_weight = DailyWeight(
+            user_id=weight_data.user_id,
+            date=entry_date,
+            weight_kg=weight_data.weight,
+            notes=weight_data.notes,
+            body_fat_percentage=weight_data.body_fat_percentage,
+            muscle_mass_kg=weight_data.muscle_mass_kg
+        )
+        
+        print(f"📝 Created DailyWeight object: {daily_weight}")
+        
+        db.add(daily_weight)
+        await db.commit()
+        await db.refresh(daily_weight)
+        
+        print(f"✅ Weight entry saved with ID: {daily_weight.id}")
+        
+        # DEBUG: Verify the entry was saved
+        verification_result = await db.execute(
+            select(DailyWeight).where(DailyWeight.id == daily_weight.id)
+        )
+        saved_entry = verification_result.scalars().first()
+        
+        if saved_entry:
+            print(f"✅ Verification: Entry exists in database with weight {saved_entry.weight_kg} kg")
+        else:
+            print(f"❌ Verification: Entry NOT found in database!")
+        
+        return {
+            "success": True,
+            "id": str(daily_weight.id),
+            "message": "Weight entry saved successfully"
+        }
+        
+    except Exception as e:
+        print(f"❌ Error saving weight entry: {e}")
+        import traceback
+        traceback.print_exc()
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/health/weight/{user_id}")
+async def get_weight_history(user_id: str, limit: int = 50, db: Session = Depends(get_db)):
+    """Get weight history for a user"""
+    try:
+        print(f"📊 Getting weight history for user: {user_id}, limit: {limit}")
+        
+        # DEBUG: First, let's see what's in the table
+        all_entries_result = await db.execute(select(DailyWeight))
+        all_entries = all_entries_result.scalars().all()
+        print(f"🔍 Total entries in daily_weight table: {len(all_entries)}")
+        
+        for entry in all_entries:
+            print(f"  - ID: {entry.id}, User: {entry.user_id}, Weight: {entry.weight_kg}, Date: {entry.date}")
+        
+        # Query using SQLAlchemy ORM
+        result = await db.execute(
+            select(DailyWeight)
+            .where(DailyWeight.user_id == user_id)
+            .order_by(DailyWeight.date.desc())
+            .limit(limit)
+        )
+        
+        weight_entries = result.scalars().all()
+        print(f"🔍 Found {len(weight_entries)} entries for user {user_id}")
+        
+        weights = []
+        for entry in weight_entries:
+            print(f"  - Processing entry: {entry.id}, Weight: {entry.weight_kg}")
+            
+            weights.append({
+                "id": str(entry.id),
+                "user_id": str(entry.user_id),
+                "date": entry.date.isoformat() if entry.date else None,
+                "weight": float(entry.weight_kg),
+                "notes": entry.notes,
+                "body_fat_percentage": float(entry.body_fat_percentage) if entry.body_fat_percentage else None,
+                "muscle_mass_kg": float(entry.muscle_mass_kg) if entry.muscle_mass_kg else None,
+                "created_at": entry.created_at.isoformat() if entry.created_at else None
+            })
+        
+        print(f"✅ Returning {len(weights)} weight entries")
+        
+        return {
+            "success": True,
+            "weights": weights,
+            "count": len(weights)
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting weight history: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/health/weight/{user_id}/latest")
+async def get_latest_weight(user_id: str, db: Session = Depends(get_db)):
+    """Get the latest weight entry for a user"""
+    try:
+        print(f"🎯 Getting latest weight for user: {user_id}")
+        
+        # Query using SQLAlchemy ORM
+        result = await db.execute(
+            select(DailyWeight)
+            .where(DailyWeight.user_id == user_id)
+            .order_by(DailyWeight.date.desc())
+            .limit(1)
+        )
+        
+        entry = result.scalars().first()
+        
+        if entry:
+            weight_data = {
+                "id": str(entry.id),
+                "user_id": str(entry.user_id),
+                "date": entry.date.isoformat() if entry.date else None,
+                "weight": float(entry.weight_kg),
+                "notes": entry.notes,
+                "body_fat_percentage": float(entry.body_fat_percentage) if entry.body_fat_percentage else None,
+                "muscle_mass_kg": float(entry.muscle_mass_kg) if entry.muscle_mass_kg else None,
+                "created_at": entry.created_at.isoformat() if entry.created_at else None
+            }
+            
+            print(f"✅ Latest weight found: {weight_data['weight']} kg")
+            
+            return {
+                "success": True,
+                "weight": weight_data
+            }
+        else:
+            print(f"❌ No weight entries found for user: {user_id}")
+            raise HTTPException(status_code=404, detail="No weight entries found")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error getting latest weight: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/api/health/weight/{entry_id}")
+async def delete_weight_entry(entry_id: str, db: Session = Depends(get_db)):
+    """Delete a weight entry"""
+    try:
+        print(f"🗑️ Deleting weight entry: {entry_id}")
+        
+        # Query and delete using SQLAlchemy ORM
+        result = await db.execute(
+            select(DailyWeight).where(DailyWeight.id == entry_id)
+        )
+        entry = result.scalars().first()
+        
+        if not entry:
+            print(f"❌ Weight entry not found: {entry_id}")
+            raise HTTPException(status_code=404, detail="Weight entry not found")
+        
+        await db.delete(entry)
+        await db.commit()
+        
+        print(f"✅ Weight entry deleted: {entry_id}")
+        
+        return {
+            "success": True,
+            "message": "Weight entry deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting weight entry: {e}")
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.patch("/api/health/user/{user_id}/weight")
+async def update_user_weight(user_id: str, weight_data: WeightUpdateRequest, db: Session = Depends(get_db)):
+    """Update user's current weight in their profile"""
+    try:
+        print(f"⚖️ Updating user weight: {user_id} -> {weight_data.weight} kg")
+        
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalars().first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # CRITICAL FIX: Only set starting weight if it's truly not set AND this is the user's profile weight being set for the first time
+        is_first_weight_entry = user.starting_weight is None
+        
+        if is_first_weight_entry:
+            # Use the user's current profile weight as starting weight, NOT the logged weight
+            starting_weight_value = user.weight if user.weight else weight_data.weight
+            user.starting_weight = starting_weight_value
+            user.starting_weight_date = datetime.now(timezone.utc)
+            print(f"🎯 LOCKED starting weight: {starting_weight_value} kg (from profile weight: {user.weight})")
+        
+        # Always update current weight
+        old_weight = user.weight
+        user.weight = weight_data.weight
+        user.updated_at = datetime.now(timezone.utc)
+        
+        # Recalculate health metrics if needed
+        if user.height and user.age and user.gender and user.activity_level:
+            health_metrics = calculate_health_metrics(
+                user.height, weight_data.weight, user.age, 
+                user.gender, user.activity_level
+            )
+            user.bmi = health_metrics['bmi']
+            user.bmr = health_metrics['bmr']
+            user.tdee = health_metrics['tdee']
+        
+        await db.commit()
+        
+        # FIXED: Calculate progress using helper function
+        weight_change = user.starting_weight - weight_data.weight if user.starting_weight else 0
+        days_tracking = safe_datetime_subtract(datetime.now(timezone.utc), user.starting_weight_date)
+        
+        print(f"✅ Weight updated. Starting: {user.starting_weight} kg, Current: {weight_data.weight} kg, Change: {weight_change:+.1f} kg, Days: {days_tracking}")
+        
+        return {
+            "success": True,
+            "message": "Weight updated successfully",
+            "progress": {
+                "starting_weight": user.starting_weight,
+                "current_weight": weight_data.weight,
+                "previous_weight": old_weight,
+                "weight_change": weight_change,
+                "days_tracking": days_tracking,
+                "is_first_entry": is_first_weight_entry,
+                "bmi": user.bmi
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Error updating user weight: {e}")
+        import traceback
+        traceback.print_exc()
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/health/user/{user_id}/weight-progress")
+async def get_weight_progress(user_id: str, db: Session = Depends(get_db)):
+    """Get comprehensive weight progress data"""
+    try:
+        print(f"📈 Getting weight progress for user: {user_id}")
+        
+        # Get user data
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalars().first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Get weight history from daily_weight table
+        weight_result = await db.execute(
+            select(DailyWeight)
+            .where(DailyWeight.user_id == user_id)
+            .order_by(DailyWeight.date.desc())
+            .limit(30)  # Last 30 entries
+        )
+        
+        weight_entries = weight_result.scalars().all()
+        
+        # Calculate progress metrics with proper timezone handling
+        starting_weight = user.starting_weight or user.weight
+        current_weight = user.weight
+        weight_change = starting_weight - current_weight if starting_weight else 0
+        
+        # FIXED: Handle timezone-aware/naive datetime calculation
+        days_tracking = 0
+        if user.starting_weight_date:
+            try:
+                if user.starting_weight_date.tzinfo is None:
+                    starting_date_aware = user.starting_weight_date.replace(tzinfo=timezone.utc)
+                else:
+                    starting_date_aware = user.starting_weight_date
+                
+                days_tracking = (datetime.now(timezone.utc) - starting_date_aware).days
+            except Exception as date_error:
+                print(f"⚠️ Error calculating days tracking: {date_error}")
+                days_tracking = 0
+        
+        # Calculate weekly/monthly trends
+        weekly_change = 0
+        monthly_change = 0
+        
+        if weight_entries:
+            # Weekly change (last 7 days)
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            weekly_entries = []
+            for entry in weight_entries:
+                entry_date = entry.date
+                # Handle timezone-naive dates from database
+                if entry_date.tzinfo is None:
+                    entry_date = entry_date.replace(tzinfo=timezone.utc)
+                
+                if entry_date >= week_ago:
+                    weekly_entries.append(entry)
+            
+            if len(weekly_entries) >= 2:
+                weekly_change = weekly_entries[0].weight_kg - weekly_entries[-1].weight_kg
+            
+            # Monthly change (last 30 days)
+            month_ago = datetime.now(timezone.utc) - timedelta(days=30)
+            monthly_entries = []
+            for entry in weight_entries:
+                entry_date = entry.date
+                # Handle timezone-naive dates from database
+                if entry_date.tzinfo is None:
+                    entry_date = entry_date.replace(tzinfo=timezone.utc)
+                
+                if entry_date >= month_ago:
+                    monthly_entries.append(entry)
+            
+            if len(monthly_entries) >= 2:
+                monthly_change = monthly_entries[0].weight_kg - monthly_entries[-1].weight_kg
+        
+        return {
+            "success": True,
+            "progress": {
+                "starting_weight": starting_weight,
+                "starting_date": user.starting_weight_date.isoformat() if user.starting_weight_date else None,
+                "current_weight": current_weight,
+                "target_weight": user.target_weight,
+                "weight_change": weight_change,
+                "weight_change_percentage": (weight_change / starting_weight * 100) if starting_weight else 0,
+                "days_tracking": days_tracking,
+                "weekly_change": weekly_change,
+                "monthly_change": monthly_change,
+                "bmi": user.bmi,
+                "entries_count": len(weight_entries),
+                "average_weekly_loss": (weight_change / max(days_tracking, 1)) * 7 if days_tracking > 0 else 0
+            }
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting weight progress: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/api/health/user/{user_id}/set-starting-weight")
+async def set_starting_weight(user_id: str, weight_data: dict, db: Session = Depends(get_db)):
+    """Manually set the starting weight for a user (one-time only)"""
+    try:
+        print(f"🎯 Setting starting weight for user: {user_id}")
+        
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalars().first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Only allow setting if not already set
+        if user.starting_weight is not None:
+            raise HTTPException(status_code=400, detail="Starting weight already set")
+        
+        starting_weight = weight_data.get('starting_weight')
+        if not starting_weight:
+            raise HTTPException(status_code=400, detail="Starting weight is required")
+        
+        user.starting_weight = starting_weight
+        user.starting_weight_date = datetime.now(timezone.utc)
+        
+        await db.commit()
+        
+        print(f"✅ Starting weight set: {starting_weight} kg")
+        
+        return {
+            "success": True,
+            "message": "Starting weight set successfully",
+            "starting_weight": starting_weight,
+            "starting_weight_date": user.starting_weight_date.isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ Error setting starting weight: {e}")
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.get("/api/health/user/{user_id}")
+async def get_user_profile_api_endpoint(user_id: str):
+    """Get user profile by ID via API"""
+    try:
+        # Use the working function from database.py
+        from database import get_user_profile
+        
+        user_data = await get_user_profile(user_id)
+        
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        return {
+            "success": True,
+            "user": user_data
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in API endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
