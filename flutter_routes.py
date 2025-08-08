@@ -246,30 +246,6 @@ async def log_meal(meal_data: MealRequest):
         raise HTTPException(status_code=500, detail=str(e))
     
 # Supplement logging functions
-@health_router.post("/supplements/preferences")
-async def save_supplement_preferences(request_data: dict):
-    """Save user's supplement preferences"""
-    try:
-        user_id = request_data.get('user_id')
-        supplements = request_data.get('supplements', [])
-        
-        if not user_id:
-            raise HTTPException(status_code=400, detail="User ID is required")
-        
-        with get_health_db_cursor() as (conn, cursor):
-            # Clear existing preferences (if you want this table)
-            # For now, let's just use the supplement_tracking table
-            
-            # Return success
-            return {
-                "success": True, 
-                "message": f"Supplement preferences saved for {len(supplements)} supplements"
-            }
-        
-    except Exception as e:
-        print(f"Error saving supplement preferences: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save preferences")
-
 @health_router.post("/supplements/log")
 async def log_supplement_intake(log_data: dict):
     """Log daily supplement intake"""
@@ -468,34 +444,53 @@ async def save_supplement_preferences(request_data: dict):
             raise HTTPException(status_code=400, detail="User ID is required")
         
         with get_health_db_cursor() as (conn, cursor):
-            # Clear existing preferences for this user
-            cursor.execute("""
-                DELETE FROM user_supplement_preferences 
-                WHERE user_id = %s
-            """, (user_id,))
-            print(f"🗑️ Cleared existing preferences for user: {user_id}")
-            
-            # Insert new preferences
+            # Instead of deleting all, use upsert logic
             for supplement in supplements:
-                new_id = str(uuid.uuid4())
+                # Check if this supplement preference already exists
                 cursor.execute("""
-                    INSERT INTO user_supplement_preferences (
-                        id, user_id, supplement_name, dosage, frequency, 
-                        preferred_time, notes, is_active, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    new_id,
-                    user_id,
-                    supplement.get('name'),
-                    supplement.get('dosage'),
-                    supplement.get('frequency', 'Daily'),
-                    supplement.get('preferred_time', '9:00 AM'),
-                    supplement.get('notes', ''),
-                    True,  # is_active
-                    datetime.now(),
-                    datetime.now()
-                ))
-                print(f"✅ Saved preference: {supplement.get('name')} - {supplement.get('dosage')}")
+                    SELECT id FROM user_supplement_preferences 
+                    WHERE user_id = %s AND supplement_name = %s
+                """, (user_id, supplement.get('name')))
+                
+                existing = cursor.fetchone()
+                
+                if existing:
+                    # Update existing preference
+                    cursor.execute("""
+                        UPDATE user_supplement_preferences 
+                        SET dosage = %s, frequency = %s, preferred_time = %s, 
+                            notes = %s, updated_at = %s
+                        WHERE user_id = %s AND supplement_name = %s
+                    """, (
+                        supplement.get('dosage'),
+                        supplement.get('frequency', 'Daily'),
+                        supplement.get('preferred_time', '9:00 AM'),
+                        supplement.get('notes', ''),
+                        datetime.now(),
+                        user_id,
+                        supplement.get('name')
+                    ))
+                    print(f"🔄 Updated preference: {supplement.get('name')}")
+                else:
+                    # Insert new preference
+                    cursor.execute("""
+                        INSERT INTO user_supplement_preferences (
+                            id, user_id, supplement_name, dosage, frequency, 
+                            preferred_time, notes, is_active, created_at, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        uuid.uuid4(),
+                        uuid.UUID(user_id),  
+                        supplement.get('name'),
+                        supplement.get('dosage'),
+                        supplement.get('frequency', 'Daily'),
+                        supplement.get('preferred_time', '9:00 AM'),
+                        supplement.get('notes', ''),
+                        True,  # is_active
+                        datetime.now(),
+                        datetime.now()
+                    ))
+                    print(f"✅ Inserted new preference: {supplement.get('name')}")
             
             conn.commit()
             print(f"💾 Committed {len(supplements)} supplement preferences to database")
@@ -518,8 +513,18 @@ async def get_supplement_preferences(user_id: str):
     """Get user's supplement preferences"""
     try:
         print(f"🔍 Getting supplement preferences for user: {user_id}")
+        print(f"🔍 User ID type: {type(user_id)}")
+        print(f"🔍 User ID length: {len(user_id)}")
         
         with get_health_db_cursor() as (conn, cursor):
+            # First, check what user IDs exist in the database
+            cursor.execute("""
+                SELECT DISTINCT user_id FROM user_supplement_preferences LIMIT 5
+            """)
+            existing_users = cursor.fetchall()
+            print(f"🔍 Existing user IDs in database: {[str(u['user_id']) for u in existing_users]}")
+            
+            # Now try the actual query
             cursor.execute("""
                 SELECT * FROM user_supplement_preferences 
                 WHERE user_id = %s AND is_active = true
@@ -527,7 +532,28 @@ async def get_supplement_preferences(user_id: str):
             """, (user_id,))
             
             preferences = cursor.fetchall()
-            print(f"📊 Found {len(preferences)} supplement preferences")
+            print(f"📊 Found {len(preferences)} supplement preferences for user: {user_id}")
+            
+            if len(preferences) == 0:
+                # Try with UUID conversion
+                try:
+                    import uuid as uuid_module
+                    user_uuid = uuid_module.UUID(user_id)
+                    cursor.execute("""
+                        SELECT * FROM user_supplement_preferences 
+                        WHERE user_id = %s AND is_active = true
+                        ORDER BY created_at ASC
+                    """, (user_uuid,))
+                    
+                    preferences_uuid = cursor.fetchall()
+                    print(f"📊 Found {len(preferences_uuid)} preferences using UUID conversion")
+                    
+                    if len(preferences_uuid) > 0:
+                        preferences = preferences_uuid
+                        print("✅ UUID conversion worked!")
+                        
+                except Exception as e:
+                    print(f"❌ UUID conversion failed: {e}")
             
         # Convert to list of dictionaries
         preferences_list = []
@@ -548,9 +574,15 @@ async def get_supplement_preferences(user_id: str):
         return {
             "success": True,
             "preferences": preferences_list,
-            "count": len(preferences_list)
+            "count": len(preferences_list),
+            "debug_info": {
+                "queried_user_id": user_id,
+                "existing_users": [str(u['user_id']) for u in existing_users] if 'existing_users' in locals() else []
+            }
         }
         
     except Exception as e:
         print(f"❌ Error getting supplement preferences: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Failed to get supplement preferences")
