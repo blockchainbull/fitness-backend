@@ -8,12 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import traceback
 from config import DATABASE_URL
-from api import router as api_router  # Your existing web API routes
+from api import router as api_router
 from database import init_database, User, SessionLocal
 from tasks import start_background_worker
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import text, select
-from flutter_routes import health_router  # Flutter-specific routes
+from flutter_routes import health_router
+from sleep_api import router as sleep_router
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -39,6 +40,7 @@ app.add_middleware(
 # Include API routes
 app.include_router(api_router, prefix="")  # Web frontend routes
 app.include_router(health_router)  # Flutter/mobile routes
+app.include_router(sleep_router, prefix="/api/health")
 
 # Startup event to initialize database and run background worker
 @app.on_event("startup")

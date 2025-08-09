@@ -1,13 +1,11 @@
 # flutter_routes.py - Updated to use unified backend
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 import traceback
 import uuid
-from flutter_models import (
-    HealthUserCreate, HealthUserResponse, HealthLoginRequest, 
-    WaterIntakeRequest, MealRequest, UnifiedOnboardingRequest
-)
-from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile, get_health_db_cursor
-from datetime import datetime, timedelta
+from flutter_models import HealthUserCreate, HealthUserResponse, HealthLoginRequest, UnifiedOnboardingRequest
+from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile, get_health_db_cursor, WaterEntryCreate
+from datetime import datetime, timedelta, timezone
+
 
 # Create a separate router for health endpoints
 health_router = APIRouter(prefix="/api/health", tags=["mobile-health"])
@@ -224,28 +222,56 @@ async def get_health_user_profile(user_id: str):
         print(f"Error fetching health user profile: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Additional endpoints for Flutter-specific features
-@health_router.post("/water-intake")
-async def log_water_intake(water_data: WaterIntakeRequest):
-    """Log water intake for mobile app"""
+@health_router.post("/auth/login")
+async def login_user(login_data: dict):
+    """Login endpoint for mobile app"""
     try:
-        # Implement water intake logging logic here
-        # This would typically save to a separate water_intake table
-        return {"success": True, "message": "Water intake logged successfully"}
+        email = login_data.get('email')
+        password = login_data.get('password')
+        
+        print(f"🔐 Login attempt for: {email}")
+        
+        if not email or not password:
+            raise HTTPException(status_code=400, detail="Email and password required")
+        
+        # Get user by email
+        user = await get_user_by_email(email)
+        if not user:
+            print(f"❌ User not found: {email}")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        # Verify password
+        if not verify_password(password, user.password):
+            print(f"❌ Invalid password for: {email}")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        
+        print(f"✅ Login successful for: {email}")
+        
+        return {
+            "success": True,
+            "user": {
+                "id": str(user.id),
+                "name": user.name,
+                "email": user.email,
+                "age": user.age,
+                "gender": user.gender,
+                "height": user.height,
+                "weight": user.weight,
+                "activity_level": user.activity_level,
+                "bmi": user.bmi,
+                "bmr": user.bmr,
+                "tdee": user.tdee
+            },
+            "message": "Login successful"
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"❌ Login error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@health_router.post("/meals")
-async def log_meal(meal_data: MealRequest):
-    """Log meal for mobile app"""
-    try:
-        # Implement meal logging logic here
-        # This would typically save to a separate meals table
-        return {"success": True, "message": "Meal logged successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
-# Supplement logging functions
+# Supplement logging endpoints
 @health_router.post("/supplements/log")
 async def log_supplement_intake(log_data: dict):
     """Log daily supplement intake"""
@@ -429,7 +455,7 @@ async def test_supplement_db():
             "error": str(e)
         }
     
-# User Supplement Preferences functions
+# User Supplement Preferences endpoints
 @health_router.post("/supplements/preferences")
 async def save_supplement_preferences(request_data: dict):
     """Save user's supplement preferences"""
@@ -586,3 +612,139 @@ async def get_supplement_preferences(user_id: str):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Failed to get supplement preferences")
+    
+# Water Logging Endpoints
+@health_router.post("/water")
+async def save_water_entry(water_data: WaterEntryCreate):
+    """Save or update daily water intake"""
+    try:
+        print(f"💧 Saving water entry: {water_data.glasses_consumed} glasses for user {water_data.user_id}")
+        
+        with get_health_db_cursor() as (conn, cursor):
+            # Parse date
+            try:
+                entry_date = datetime.fromisoformat(water_data.date.replace('Z', '+00:00'))
+                if entry_date.tzinfo is None:
+                    entry_date = entry_date.replace(tzinfo=timezone.utc)
+            except ValueError:
+                entry_date = datetime.now(timezone.utc)
+            
+            # Check if entry exists for this date
+            cursor.execute("""
+                SELECT id FROM daily_water 
+                WHERE user_id = %s AND date::date = %s::date
+            """, (water_data.user_id, entry_date.date()))
+            
+            existing_entry = cursor.fetchone()
+            
+            if existing_entry:
+                # Update existing entry
+                cursor.execute("""
+                    UPDATE daily_water 
+                    SET glasses_consumed = %s, total_ml = %s, target_ml = %s, 
+                        notes = %s, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = %s AND date::date = %s::date
+                    RETURNING id
+                """, (
+                    water_data.glasses_consumed, water_data.total_ml, water_data.target_ml,
+                    water_data.notes, water_data.user_id, entry_date.date()
+                ))
+            else:
+                # Create new entry
+                entry_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO daily_water 
+                    (id, user_id, date, glasses_consumed, total_ml, target_ml, notes)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    entry_id, water_data.user_id, entry_date, 
+                    water_data.glasses_consumed, water_data.total_ml, 
+                    water_data.target_ml, water_data.notes
+                ))
+            
+            result = cursor.fetchone()
+            saved_id = result['id']
+            
+            print(f"✅ Water entry saved with ID: {saved_id}")
+            return {"success": True, "id": saved_id}
+            
+    except Exception as e:
+        print(f"❌ Error saving water entry: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@health_router.get("/water/{user_id}")
+async def get_water_history(user_id: str, limit: int = 30):
+    """Get water intake history for a user"""
+    try:
+        print(f"💧 Getting water history for user: {user_id}")
+        
+        with get_health_db_cursor() as (conn, cursor):
+            cursor.execute("""
+                SELECT * FROM daily_water 
+                WHERE user_id = %s 
+                ORDER BY date DESC 
+                LIMIT %s
+            """, (user_id, limit))
+            
+            entries = cursor.fetchall()
+            
+            water_entries = []
+            for entry in entries:
+                water_entries.append({
+                    'id': str(entry['id']),
+                    'user_id': str(entry['user_id']),
+                    'date': entry['date'].isoformat(),
+                    'glasses_consumed': entry['glasses_consumed'],
+                    'total_ml': float(entry['total_ml']),
+                    'target_ml': float(entry['target_ml']),
+                    'notes': entry['notes'],
+                    'created_at': entry['created_at'].isoformat() if entry['created_at'] else None,
+                    'updated_at': entry['updated_at'].isoformat() if entry['updated_at'] else None,
+                })
+            
+            print(f"✅ Retrieved {len(water_entries)} water entries")
+            return {"success": True, "entries": water_entries}
+            
+    except Exception as e:
+        print(f"❌ Error getting water history: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@health_router.get("/water/{user_id}/today")
+async def get_today_water(user_id: str):
+    """Get today's water intake"""
+    try:
+        print(f"💧 Getting today's water for user: {user_id}")
+        
+        with get_health_db_cursor() as (conn, cursor):
+            today = datetime.now(timezone.utc).date()
+            
+            cursor.execute("""
+                SELECT * FROM daily_water 
+                WHERE user_id = %s AND date::date = %s
+            """, (user_id, today))
+            
+            entry = cursor.fetchone()
+            
+            if entry:
+                water_entry = {
+                    'id': str(entry['id']),
+                    'user_id': str(entry['user_id']),
+                    'date': entry['date'].isoformat(),
+                    'glasses_consumed': entry['glasses_consumed'],
+                    'total_ml': float(entry['total_ml']),
+                    'target_ml': float(entry['target_ml']),
+                    'notes': entry['notes'],
+                    'created_at': entry['created_at'].isoformat() if entry['created_at'] else None,
+                    'updated_at': entry['updated_at'].isoformat() if entry['updated_at'] else None,
+                }
+                return {"success": True, "entry": water_entry}
+            else:
+                return {"success": True, "entry": None}
+                
+    except Exception as e:
+        print(f"❌ Error getting today's water: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

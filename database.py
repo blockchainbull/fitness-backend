@@ -11,7 +11,9 @@ from passlib.context import CryptContext
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, date
+from typing import Optional
+from pydantic import BaseModel, Field
 import os
 import psycopg2
 import uuid
@@ -158,20 +160,6 @@ class DailyNutrition(Base):
     meals_logged = Column(Integer, default=0)
     created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)) 
 
-class DailySleep(Base):
-    """Daily sleep tracking"""
-    __tablename__ = "daily_sleep"
-    
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    date = Column(DateTime, nullable=False)
-    bedtime = Column(DateTime)
-    wake_time = Column(DateTime)
-    total_hours = Column(Float, default=0.0)
-    quality_score = Column(Float, default=0.0)
-    deep_sleep_hours = Column(Float, default=0.0)
-    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
-
 class DailyWeight(Base):
     """Daily weight tracking"""
     __tablename__ = "daily_weight"
@@ -241,6 +229,59 @@ class UserSupplementPreferences(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class DailyWater(Base):
+    """Daily water tracking"""
+    __tablename__ = "daily_water"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    glasses_consumed = Column(Integer, default=0)
+    total_ml = Column(Float, default=0.0)
+    target_ml = Column(Float, default=2000.0)  # Default 2L target
+    notes = Column(String(500))
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class WaterEntryCreate(BaseModel):
+    user_id: str
+    date: str
+    glasses_consumed: int = 0
+    total_ml: float = 0.0
+    target_ml: float = 2000.0
+    notes: Optional[str] = None
+
+class WaterEntryUpdate(BaseModel):
+    glasses_consumed: Optional[int] = None
+    total_ml: Optional[float] = None
+    target_ml: Optional[float] = None
+    notes: Optional[str] = None
+
+class WaterEntryResponse(BaseModel):
+    id: str
+    user_id: str
+    date: str
+    glasses_consumed: int
+    total_ml: float
+    target_ml: float
+    notes: Optional[str]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+
+class DailySleep(Base):
+    """Daily sleep tracking"""
+    __tablename__ = "daily_sleep"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    date = Column(DateTime, nullable=False)
+    bedtime = Column(DateTime)
+    wake_time = Column(DateTime)
+    total_hours = Column(Float, default=0.0)
+    quality_score = Column(Float, default=0.0)
+    deep_sleep_hours = Column(Float, default=0.0)
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class Conversation(Base):
     """Database model for storing user conversations."""
