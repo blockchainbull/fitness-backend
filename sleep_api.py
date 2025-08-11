@@ -1,6 +1,6 @@
 # sleep_api.py
 from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from datetime import datetime, date, timedelta
 from typing import Optional, List
 from database import SessionLocal, DailySleep
@@ -29,6 +29,12 @@ class SleepEntryResponse(BaseModel):
     quality_score: float
     deep_sleep_hours: float
     created_at: datetime
+
+    @validator('id', 'user_id', pre=True)
+    def convert_uuid_to_str(cls, v):
+        if isinstance(v, uuid.UUID):
+            return str(v)
+        return v
 
     class Config:
         from_attributes = True
@@ -118,30 +124,47 @@ async def get_sleep_history(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/entries/{user_id}/date/{entry_date}", response_model=SleepEntryResponse)
+@router.get("/entries/{user_id}/{entry_date}", response_model=SleepEntryResponse)
 async def get_sleep_entry_by_date(
     user_id: str,
-    entry_date: date,
+    entry_date: str,  # Changed from date to str to handle the format
     db: AsyncSession = Depends(get_db)
 ):
     """Get sleep entry for a specific date"""
     try:
+        # Parse the date string
+        from datetime import datetime
+        date_obj = datetime.strptime(entry_date, "%Y-%m-%d").date()
+        
         query = select(DailySleep).where(
             DailySleep.user_id == user_id,
-            func.date(DailySleep.date) == entry_date
+            func.date(DailySleep.date) == date_obj
         )
         
         result = await db.execute(query)
         sleep_entry = result.scalar_one_or_none()
         
         if not sleep_entry:
-            raise HTTPException(status_code=404, detail="Sleep entry not found")
+            # Return 404 but this is expected when no entry exists
+            raise HTTPException(status_code=404, detail="No sleep entry for this date")
         
-        return sleep_entry
+        # Convert UUIDs to strings
+        return SleepEntryResponse(
+            id=str(sleep_entry.id),
+            user_id=str(sleep_entry.user_id),
+            date=sleep_entry.date.date() if sleep_entry.date else date_obj,
+            bedtime=sleep_entry.bedtime,
+            wake_time=sleep_entry.wake_time,
+            total_hours=sleep_entry.total_hours,
+            quality_score=sleep_entry.quality_score,
+            deep_sleep_hours=sleep_entry.deep_sleep_hours,
+            created_at=sleep_entry.created_at
+        )
         
     except HTTPException:
         raise
     except Exception as e:
+        print(f"Error getting sleep entry: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/entries/{entry_id}", response_model=SleepEntryResponse)
