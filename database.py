@@ -158,7 +158,41 @@ class DailyNutrition(Base):
     fat_g = Column(Float, default=0.0)
     water_liters = Column(Float, default=0.0)
     meals_logged = Column(Integer, default=0)
-    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)) 
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class MealEntry(Base):
+    """Individual meal entries"""
+    __tablename__ = "meal_entries"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    
+    # Basic meal info
+    food_item = Column(String(500), nullable=False)
+    quantity = Column(String(100))
+    preparation = Column(String(200))
+    meal_type = Column(String(20))  # breakfast, lunch, dinner, snack
+    
+    # Nutrition data
+    calories = Column(Float, default=0)
+    protein_g = Column(Float, default=0)
+    carbs_g = Column(Float, default=0)
+    fat_g = Column(Float, default=0)
+    fiber_g = Column(Float, default=0)
+    sugar_g = Column(Float, default=0)
+    sodium_mg = Column(Float, default=0)
+    
+    # Additional nutrition info (stored as JSON)
+    nutrition_data = Column(JSONB)
+    
+    # Metadata
+    data_source = Column(String(50))  # 'ai', 'usda', 'manual'
+    confidence_score = Column(Float, default=0.8)
+    
+    # Timestamps
+    meal_date = Column(DateTime, nullable=False)
+    logged_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class DailyWeight(Base):
     """Daily weight tracking"""
