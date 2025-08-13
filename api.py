@@ -7,10 +7,8 @@ from typing import Optional, Dict, Any
 from models import PromptRequest
 from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile, SessionLocal
 from agent import get_agent_response
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-import uuid
 import traceback
 from datetime import datetime, timezone, timedelta
 from database import User, hash_password, DailyWeight
@@ -1129,3 +1127,4 @@ async def get_user_profile_api_endpoint(user_id: str):
     except Exception as e:
         print(f"❌ Error in API endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    

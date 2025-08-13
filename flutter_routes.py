@@ -1,11 +1,12 @@
 # flutter_routes.py - Updated to use unified backend
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException
 import traceback
 import uuid
 from flutter_models import HealthUserCreate, HealthUserResponse, HealthLoginRequest, UnifiedOnboardingRequest
 from database import create_user_from_onboarding, get_user_by_email, verify_password, get_user_profile, get_health_db_cursor, WaterEntryCreate
 from datetime import datetime, timedelta, timezone
-
+from sqlalchemy import select
+from database import SessionLocal, PeriodTracking
 
 # Create a separate router for health endpoints
 health_router = APIRouter(prefix="/api/health", tags=["mobile-health"])
@@ -39,6 +40,7 @@ async def create_health_user(user_profile: HealthUserCreate):
                 "hasPeriods": user_profile.hasPeriods,
                 "lastPeriodDate": user_profile.lastPeriodDate,
                 "cycleLength": user_profile.cycleLength,
+                "periodLength": user_profile.periodLength if hasattr(user_profile, 'periodLength') else 5,
                 "cycleLengthRegular": user_profile.cycleLengthRegular,
                 "pregnancyStatus": user_profile.pregnancyStatus,
                 "trackingPreference": user_profile.periodTrackingPreference,
@@ -748,3 +750,152 @@ async def get_today_water(user_id: str):
         print(f"❌ Error getting today's water: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    
+#Period Logging endpoints
+@health_router.post("/period")
+async def save_period_entry(request: dict):
+    """Save or update period entry"""
+    async with SessionLocal() as session:
+        try:
+            period_id = request.get('id')
+            if not period_id:
+                period_id = str(uuid.uuid4())
+            else:
+                # Try to parse as UUID if it's a string
+                try:
+                    period_id = str(uuid.UUID(period_id))
+                except:
+                    period_id = str(uuid.uuid4())
+            
+            # Check if entry exists
+            existing = await session.execute(
+                select(PeriodTracking).where(PeriodTracking.id == uuid.UUID(period_id))
+            )
+            existing_entry = existing.scalars().first()
+            
+            if existing_entry:
+                # Update existing
+                if request.get('end_date'):
+                    existing_entry.end_date = datetime.fromisoformat(request['end_date'].replace('Z', '+00:00'))
+                existing_entry.flow_intensity = request.get('flow_intensity', existing_entry.flow_intensity)
+                existing_entry.symptoms = request.get('symptoms', existing_entry.symptoms)
+                existing_entry.mood = request.get('mood', existing_entry.mood)
+                existing_entry.notes = request.get('notes', existing_entry.notes)
+            else:
+                # Create new
+                new_entry = PeriodTracking(
+                    id=uuid.UUID(period_id),
+                    user_id=uuid.UUID(request['user_id']),
+                    start_date=datetime.fromisoformat(request['start_date'].replace('Z', '+00:00')),
+                    end_date=datetime.fromisoformat(request['end_date'].replace('Z', '+00:00')) if request.get('end_date') else None,
+                    flow_intensity=request.get('flow_intensity', 'Medium'),
+                    symptoms=request.get('symptoms', []),
+                    mood=request.get('mood'),
+                    notes=request.get('notes')
+                )
+                session.add(new_entry)
+            
+            await session.commit()
+            return {"id": str(period_id), "status": "success"}
+            
+        except Exception as e:
+            await session.rollback()
+            print(f"Error saving period entry: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=400, detail=str(e))
+
+@health_router.get("/period/{user_id}") 
+async def get_period_history(user_id: str, limit: int = 12):
+    """Get period history for user"""
+    async with SessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(PeriodTracking)
+                .where(PeriodTracking.user_id == uuid.UUID(user_id))
+                .order_by(PeriodTracking.start_date.desc())
+                .limit(limit)
+            )
+            
+            entries = result.scalars().all()
+            return [
+                {
+                    "id": str(entry.id),
+                    "user_id": str(entry.user_id),
+                    "start_date": entry.start_date.isoformat() if entry.start_date else None,
+                    "end_date": entry.end_date.isoformat() if entry.end_date else None,
+                    "flow_intensity": entry.flow_intensity,
+                    "symptoms": entry.symptoms or [],
+                    "mood": entry.mood,
+                    "notes": entry.notes,
+                    "created_at": entry.created_at.isoformat() if entry.created_at else None
+                }
+                for entry in entries
+            ]
+            
+        except Exception as e:
+            print(f"Error fetching period history: {e}")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=400, detail=str(e))
+
+@health_router.get("/period/{user_id}/current")
+async def get_current_period(user_id: str):
+    """Get current active period for user"""
+    async with SessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(PeriodTracking)
+                .where(
+                    and_(
+                        PeriodTracking.user_id == uuid.UUID(user_id),
+                        PeriodTracking.end_date == None
+                    )
+                )
+                .order_by(PeriodTracking.start_date.desc())
+                .limit(1)
+            )
+            
+            entry = result.scalars().first()
+            
+            if entry:
+                return {
+                    "id": str(entry.id),
+                    "user_id": str(entry.user_id),
+                    "start_date": entry.start_date.isoformat() if entry.start_date else None,
+                    "end_date": None,
+                    "flow_intensity": entry.flow_intensity,
+                    "symptoms": entry.symptoms or [],
+                    "mood": entry.mood,
+                    "notes": entry.notes,
+                    "created_at": entry.created_at.isoformat() if entry.created_at else None
+                }
+            else:
+                return None
+            
+        except Exception as e:
+            print(f"Error fetching current period: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
+
+@health_router.delete("/period/{entry_id}")
+async def delete_period_entry(entry_id: str):
+    """Delete a period entry"""
+    async with SessionLocal() as session:
+        try:
+            result = await session.execute(
+                select(PeriodTracking).where(PeriodTracking.id == uuid.UUID(entry_id))
+            )
+            entry = result.scalars().first()
+            
+            if not entry:
+                raise HTTPException(status_code=404, detail="Period entry not found")
+            
+            await session.delete(entry)
+            await session.commit()
+            
+            return {"status": "success", "message": "Period entry deleted"}
+            
+        except Exception as e:
+            await session.rollback()
+            print(f"Error deleting period entry: {e}")
+            raise HTTPException(status_code=400, detail=str(e))

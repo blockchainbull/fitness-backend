@@ -11,9 +11,9 @@ from passlib.context import CryptContext
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import os
 import psycopg2
 import uuid
@@ -76,8 +76,9 @@ class User(Base):
     
     # Reproductive health fields
     has_periods = Column(Boolean, nullable=True)
-    last_period_date = Column(DateTime, nullable=True)
+    last_period_date = Column(TIMESTAMP(timezone=True), default=None)
     cycle_length = Column(Integer, nullable=True)
+    period_length = Column(Integer, default=5)
     cycle_length_regular = Column(Boolean, nullable=True)
     pregnancy_status = Column(String(50), nullable=True)
     period_tracking_preference = Column(String(50), nullable=True)
@@ -443,6 +444,7 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
             has_periods = None
             last_period_date = None
             cycle_length = None
+            period_length = None
             cycle_length_regular = None
             pregnancy_status = None
             period_tracking_preference = None
@@ -451,6 +453,7 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
                 has_periods = period_cycle.get('hasPeriods')
                 last_period_date_str = period_cycle.get('lastPeriodDate')
                 cycle_length = period_cycle.get('cycleLength')
+                period_length = period_cycle.get('periodLength', 5)
                 cycle_length_regular = period_cycle.get('cycleLengthRegular')
                 pregnancy_status = period_cycle.get('pregnancyStatus')
                 period_tracking_preference = period_cycle.get('trackingPreference')
@@ -468,6 +471,7 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
                 print(f"  has_periods: {has_periods}")
                 print(f"  last_period_date: {last_period_date}")
                 print(f"  cycle_length: {cycle_length}")
+                print(f"  period_length: {period_length}")
                 print(f"  cycle_length_regular: {cycle_length_regular}")
                 print(f"  pregnancy_status: {pregnancy_status}")
                 print(f"  period_tracking_preference: {period_tracking_preference}")
@@ -499,6 +503,7 @@ async def create_user_from_onboarding(onboarding_data: dict) -> str:
                 has_periods=period_cycle.get('hasPeriods', None),
                 last_period_date=parse_date_string(period_cycle.get('lastPeriodDate', '')),
                 cycle_length=period_cycle.get('cycleLength', None),
+                period_length=period_length or 5,
                 cycle_length_regular=period_cycle.get('cycleLengthRegular', None),
                 pregnancy_status=period_cycle.get('pregnancyStatus', None),
                 period_tracking_preference=period_cycle.get('trackingPreference', None),
@@ -752,6 +757,9 @@ async def get_user_profile(user_id: str):
     
     async with SessionLocal() as session:
         try:
+            if isinstance(user_id, str):
+                user_id = uuid.UUID(user_id)
+
             result = await session.execute(
                 select(User).where(User.id == user_id_uuid)
             )
@@ -761,6 +769,13 @@ async def get_user_profile(user_id: str):
                 print(f"No user found with ID: {user_id} (UUID: {user_id_uuid})")
                 return {}
             
+            def format_datetime(dt):
+                if dt is None:
+                    return None
+                if isinstance(dt, datetime):
+                    return dt.isoformat()
+                return str(dt)
+
             # Build comprehensive user data object
             user_data = {
                 "id": str(user.id),
@@ -782,10 +797,12 @@ async def get_user_profile(user_id: str):
                 # Reproductive health fields
                 "hasPeriods": user.has_periods,
                 "has_periods": user.has_periods,
-                "lastPeriodDate": user.last_period_date,  
-                "last_period_date": user.last_period_date,
+                "lastPeriodDate": format_datetime(user.last_period_date),
+                "last_period_date": format_datetime(user.last_period_date),
                 "cycleLength": user.cycle_length,
                 "cycle_length": user.cycle_length,
+                "periodLength": user.period_length,
+                "period_length": user.period_length,
                 "cycleLengthRegular": user.cycle_length_regular,
                 "cycle_length_regular": user.cycle_length_regular,
                 "pregnancyStatus": user.pregnancy_status,
@@ -1000,8 +1017,6 @@ async def update_user_in_db(user_id: str, update_data: dict):
                     bmr = 447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age)
                 update_data['bmr'] = round(bmr)
         
-                # Update in your database (adjust based on your database setup)
-                # This is a placeholder - implement based on your database
                 users_collection = get_database()["users"]
 
                 result = await users_collection.update_one(
@@ -1043,3 +1058,4 @@ async def update_user_password_in_db(user_id: str, new_password_hash: str):
     except Exception as e:
         print(f"❌ Database error updating password: {e}")
         raise e
+

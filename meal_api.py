@@ -160,15 +160,21 @@ async def analyze_meal(request: MealAnalysisRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
-async def update_daily_nutrition(session, user_id: str, date: date, nutrition_data: dict):
+async def update_daily_nutrition(session, user_id: str, date_obj: date, nutrition_data: dict):
     """Update or create daily nutrition totals"""
     try:
+        print(f"📊 Updating daily nutrition for user {user_id} on {date_obj}")
+        
+        # Convert date to datetime for database query
+        start_of_day = datetime.combine(date_obj, datetime.min.time())
+        
         # Check if daily nutrition entry exists
         result = await session.execute(
             select(DailyNutrition).where(
                 and_(
                     DailyNutrition.user_id == uuid.UUID(user_id),
-                    DailyNutrition.date == date
+                    DailyNutrition.date >= start_of_day,
+                    DailyNutrition.date < start_of_day + timedelta(days=1)
                 )
             )
         )
@@ -176,6 +182,7 @@ async def update_daily_nutrition(session, user_id: str, date: date, nutrition_da
         
         if daily_nutrition:
             # Update existing entry
+            print(f"📝 Updating existing daily nutrition entry")
             daily_nutrition.calories_consumed += nutrition_data['calories']
             daily_nutrition.protein_g += nutrition_data['protein_g']
             daily_nutrition.carbs_g += nutrition_data['carbs_g']
@@ -183,22 +190,26 @@ async def update_daily_nutrition(session, user_id: str, date: date, nutrition_da
             daily_nutrition.meals_logged += 1
         else:
             # Create new entry
+            print(f"➕ Creating new daily nutrition entry")
             daily_nutrition = DailyNutrition(
                 user_id=uuid.UUID(user_id),
-                date=date,
+                date=start_of_day,  # Use start of day as the date
                 calories_consumed=nutrition_data['calories'],
                 protein_g=nutrition_data['protein_g'],
                 carbs_g=nutrition_data['carbs_g'],
                 fat_g=nutrition_data['fat_g'],
+                water_liters=0.0,
                 meals_logged=1
             )
             session.add(daily_nutrition)
         
         await session.commit()
-        print(f"✅ Daily nutrition updated for {date}")
+        print(f"✅ Daily nutrition updated: {daily_nutrition.calories_consumed} cal, {daily_nutrition.meals_logged} meals")
         
     except Exception as e:
         print(f"❌ Error updating daily nutrition: {e}")
+        import traceback
+        traceback.print_exc()
 
 @meal_router.get("/history/{user_id}")
 async def get_meal_history(
