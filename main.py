@@ -16,6 +16,7 @@ from sqlalchemy import text, select
 from flutter_routes import health_router
 from sleep_api import router as sleep_router
 from meal_api import meal_router
+from exercise_api import exercise_router
 
 # SQLAlchemy setup
 Base = declarative_base()
@@ -43,6 +44,7 @@ app.include_router(api_router, prefix="")  # Web frontend routes
 app.include_router(health_router)  # Flutter/mobile routes
 app.include_router(sleep_router, prefix="/api/health")
 app.include_router(meal_router)
+app.include_router(exercise_router)
 
 # Startup event to initialize database and run background worker
 @app.on_event("startup")

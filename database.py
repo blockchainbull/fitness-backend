@@ -208,19 +208,23 @@ class DailyWeight(Base):
     notes = Column(String(500))
     created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-class WorkoutSessions(Base):
-    """Workout session tracking"""
-    __tablename__ = "workout_sessions"
+class ExerciseLog(Base):
+    """Exercise logging table"""
+    __tablename__ = "exercise_logs"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    date = Column(DateTime, nullable=False)
-    workout_type = Column(String(100))
-    duration_minutes = Column(Integer)
+    exercise_name = Column(String(100), nullable=False)
+    exercise_type = Column(String(50), nullable=False)  # cardio, strength, flexibility, sports
+    duration_minutes = Column(Integer, nullable=False)
     calories_burned = Column(Float)
-    intensity = Column(String(20))
-    notes = Column(String(1000))
-    exercises = Column(JSONB)
+    distance_km = Column(Float)
+    sets = Column(Integer)
+    reps = Column(Integer)
+    weight_kg = Column(Float)
+    intensity = Column(String(20), default="moderate")
+    notes = Column(String(500))
+    exercise_date = Column(TIMESTAMP(timezone=True), nullable=False)
     created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class PeriodTracking(Base):
