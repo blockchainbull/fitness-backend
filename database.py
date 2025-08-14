@@ -141,10 +141,38 @@ class DailySteps(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     date = Column(DateTime, nullable=False)
     steps = Column(Integer, default=0)
+    goal = Column(Integer, default=10000)  # Added goal column
     calories_burned = Column(Float, default=0.0)
     distance_km = Column(Float, default=0.0)
     active_minutes = Column(Integer, default=0)
-    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))  
+    source_type = Column(String(20), default='manual')  # Added source_type column
+    last_synced = Column(TIMESTAMP(timezone=True), nullable=True)  # Added last_synced column
+    created_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(TIMESTAMP(timezone=True), default=lambda: datetime.now(timezone.utc)) 
+
+class StepEntryCreate(BaseModel):
+    userId: str
+    date: str  # ISO format
+    steps: int
+    goal: int = 10000
+    caloriesBurned: float = 0.0
+    distanceKm: float = 0.0
+    activeMinutes: int = 0
+    sourceType: str = "manual"
+
+class StepEntryResponse(BaseModel):
+    id: str
+    userId: str
+    date: str
+    steps: int
+    goal: int
+    caloriesBurned: float
+    distanceKm: float
+    activeMinutes: int
+    sourceType: str
+    lastSynced: Optional[str] = None
+    createdAt: str
+    updatedAt: str
 
 class DailyNutrition(Base):
     """Daily nutrition tracking"""
@@ -1062,4 +1090,3 @@ async def update_user_password_in_db(user_id: str, new_password_hash: str):
     except Exception as e:
         print(f"❌ Database error updating password: {e}")
         raise e
-

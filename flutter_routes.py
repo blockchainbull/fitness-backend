@@ -7,6 +7,7 @@ from database import create_user_from_onboarding, get_user_by_email, verify_pass
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from database import SessionLocal, PeriodTracking
+from database import StepEntryCreate, StepEntryResponse
 
 # Create a separate router for health endpoints
 health_router = APIRouter(prefix="/api/health", tags=["mobile-health"])
@@ -899,3 +900,262 @@ async def delete_period_entry(entry_id: str):
             await session.rollback()
             print(f"Error deleting period entry: {e}")
             raise HTTPException(status_code=400, detail=str(e))
+        
+#step Logging endpoints
+@health_router.get("/steps/{user_id}/today")
+async def get_today_steps(user_id: str):
+    """Get today's step entry for a user"""
+    try:
+        with get_health_db_cursor() as (conn, cursor):
+            today = datetime.now().date()
+            
+            cursor.execute("""
+                SELECT id, user_id, date, steps, goal, calories_burned, 
+                       distance_km, active_minutes, source_type, last_synced,
+                       created_at, updated_at
+                FROM daily_steps 
+                WHERE user_id = %s AND date::date = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id, today))
+            
+            result = cursor.fetchone()
+            
+            if result:
+                return {
+                    "id": str(result['id']),
+                    "userId": str(result['user_id']),
+                    "date": result['date'].strftime('%Y-%m-%d') if hasattr(result['date'], 'strftime') else str(result['date']),
+                    "steps": result['steps'] or 0,
+                    "goal": result['goal'] or 10000,
+                    "caloriesBurned": result['calories_burned'] or 0.0,
+                    "distanceKm": result['distance_km'] or 0.0,
+                    "activeMinutes": result['active_minutes'] or 0,
+                    "sourceType": result['source_type'] or "manual",
+                    "lastSynced": result['last_synced'].isoformat() if result['last_synced'] else None,
+                    "createdAt": result['created_at'].isoformat(),
+                    "updatedAt": result['updated_at'].isoformat() if result['updated_at'] else result['created_at'].isoformat()
+                }
+            
+            return None
+            
+    except Exception as e:
+        print(f"Error getting today's steps: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@health_router.get("/steps/{user_id}/range")
+async def get_steps_in_range(
+    user_id: str, 
+    start: str,  # ISO date string
+    end: str     # ISO date string
+):
+    """Get step entries for a date range"""
+    try:
+        with get_health_db_cursor() as (conn, cursor):
+            start_date = datetime.fromisoformat(start.replace('Z', '+00:00')).date()
+            end_date = datetime.fromisoformat(end.replace('Z', '+00:00')).date()
+            
+            cursor.execute("""
+                SELECT id, user_id, date, steps, goal, calories_burned, 
+                       distance_km, active_minutes, source_type, last_synced,
+                       created_at, updated_at
+                FROM daily_steps 
+                WHERE user_id = %s AND date::date BETWEEN %s AND %s
+                ORDER BY date DESC
+            """, (user_id, start_date, end_date))
+            
+            results = cursor.fetchall()
+            
+            step_entries = []
+            for result in results:
+                step_entries.append({
+                    "id": str(result['id']),
+                    "userId": str(result['user_id']),
+                    "date": result['date'].strftime('%Y-%m-%d') if hasattr(result['date'], 'strftime') else str(result['date']),
+                    "steps": result['steps'] or 0,
+                    "goal": result['goal'] or 10000,
+                    "caloriesBurned": result['calories_burned'] or 0.0,
+                    "distanceKm": result['distance_km'] or 0.0,
+                    "activeMinutes": result['active_minutes'] or 0,
+                    "sourceType": result['source_type'] or "manual",
+                    "lastSynced": result['last_synced'].isoformat() if result['last_synced'] else None,
+                    "createdAt": result['created_at'].isoformat(),
+                    "updatedAt": result['updated_at'].isoformat() if result['updated_at'] else result['created_at'].isoformat()
+                })
+            
+            return step_entries
+            
+    except Exception as e:
+        print(f"Error getting steps in range: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@health_router.post("/steps")
+async def save_step_entry(step_data: StepEntryCreate):
+    """Save or update a step entry"""
+    try:
+        with get_health_db_cursor() as (conn, cursor):
+            entry_date = datetime.fromisoformat(step_data.date.replace('Z', '+00:00'))
+            now = datetime.now()
+            
+            # Check if entry exists for this date
+            cursor.execute("""
+                SELECT id FROM daily_steps 
+                WHERE user_id = %s AND date::date = %s
+            """, (step_data.userId, entry_date.date()))
+            
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Update existing entry
+                cursor.execute("""
+                    UPDATE daily_steps 
+                    SET steps = %s, goal = %s, calories_burned = %s, 
+                        distance_km = %s, active_minutes = %s, 
+                        source_type = %s, last_synced = %s, updated_at = %s
+                    WHERE user_id = %s AND date::date = %s
+                """, (
+                    step_data.steps, step_data.goal, step_data.caloriesBurned,
+                    step_data.distanceKm, step_data.activeMinutes,
+                    step_data.sourceType, now, now,
+                    step_data.userId, entry_date.date()
+                ))
+                print(f"✅ Updated step entry for {step_data.userId} on {entry_date.date()}")
+            else:
+                # Create new entry
+                new_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO daily_steps 
+                    (id, user_id, date, steps, goal, calories_burned, distance_km, 
+                     active_minutes, source_type, last_synced, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    new_id, step_data.userId, entry_date, step_data.steps, step_data.goal,
+                    step_data.caloriesBurned, step_data.distanceKm, step_data.activeMinutes,
+                    step_data.sourceType, now, now, now
+                ))
+                print(f"✅ Created new step entry for {step_data.userId} on {entry_date.date()} with ID {new_id}")
+            
+            conn.commit()
+            return {"success": True, "message": "Step entry saved successfully"}
+            
+    except Exception as e:
+        print(f"Error saving step entry: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@health_router.get("/steps/{user_id}")
+async def get_all_steps(user_id: str, limit: int = 100):
+    """Get all step entries for a user (with optional limit)"""
+    try:
+        with get_health_db_cursor() as (conn, cursor):
+            cursor.execute("""
+                SELECT id, user_id, date, steps, goal, calories_burned, 
+                       distance_km, active_minutes, source_type, last_synced,
+                       created_at, updated_at
+                FROM daily_steps 
+                WHERE user_id = %s
+                ORDER BY date DESC
+                LIMIT %s
+            """, (user_id, limit))
+            
+            results = cursor.fetchall()
+            
+            step_entries = []
+            for result in results:
+                step_entries.append({
+                    "id": str(result['id']),
+                    "userId": str(result['user_id']),
+                    "date": result['date'].strftime('%Y-%m-%d') if hasattr(result['date'], 'strftime') else str(result['date']),
+                    "steps": result['steps'] or 0,
+                    "goal": result['goal'] or 10000,
+                    "caloriesBurned": result['calories_burned'] or 0.0,
+                    "distanceKm": result['distance_km'] or 0.0,
+                    "activeMinutes": result['active_minutes'] or 0,
+                    "sourceType": result['source_type'] or "manual",
+                    "lastSynced": result['last_synced'].isoformat() if result['last_synced'] else None,
+                    "createdAt": result['created_at'].isoformat(),
+                    "updatedAt": result['updated_at'].isoformat() if result['updated_at'] else result['created_at'].isoformat()
+                })
+            
+            return step_entries
+            
+    except Exception as e:
+        print(f"Error getting all steps: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@health_router.delete("/steps/{user_id}/{date}")
+async def delete_step_entry(user_id: str, date: str):
+    """Delete a step entry for a specific date"""
+    try:
+        with get_health_db_cursor() as (conn, cursor):
+            entry_date = datetime.fromisoformat(date.replace('Z', '+00:00')).date()
+            
+            cursor.execute("""
+                DELETE FROM daily_steps 
+                WHERE user_id = %s AND date::date = %s
+            """, (user_id, entry_date))
+            
+            conn.commit()
+            return {"success": True, "message": "Step entry deleted successfully"}
+            
+    except Exception as e:
+        print(f"Error deleting step entry: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@health_router.get("/steps/{user_id}/stats")
+async def get_step_stats(user_id: str, days: int = 30):
+    """Get step statistics for the last N days"""
+    try:
+        with get_health_db_cursor() as (conn, cursor):
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=days)
+            
+            # Get basic stats
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_days,
+                    SUM(steps) as total_steps,
+                    AVG(steps) as avg_steps,
+                    MAX(steps) as max_steps,
+                    MIN(steps) as min_steps,
+                    SUM(CASE WHEN steps >= goal THEN 1 ELSE 0 END) as goals_achieved,
+                    SUM(calories_burned) as total_calories,
+                    SUM(distance_km) as total_distance,
+                    SUM(active_minutes) as total_active_minutes
+                FROM daily_steps 
+                WHERE user_id = %s AND date::date BETWEEN %s AND %s
+            """, (user_id, start_date, end_date))
+            
+            stats = cursor.fetchone()
+            
+            if stats and stats['total_days'] > 0:  # If we have data
+                return {
+                    "period_days": days,
+                    "total_days": stats['total_days'],
+                    "total_steps": stats['total_steps'] or 0,
+                    "avg_steps": round(stats['avg_steps'] or 0),
+                    "max_steps": stats['max_steps'] or 0,
+                    "min_steps": stats['min_steps'] or 0,
+                    "goals_achieved": stats['goals_achieved'] or 0,
+                    "goal_achievement_rate": round((stats['goals_achieved'] or 0) / stats['total_days'] * 100, 1),
+                    "total_calories": round(stats['total_calories'] or 0, 1),
+                    "total_distance": round(stats['total_distance'] or 0, 2),
+                    "total_active_minutes": stats['total_active_minutes'] or 0
+                }
+            else:
+                return {
+                    "period_days": days,
+                    "total_days": 0,
+                    "total_steps": 0,
+                    "avg_steps": 0,
+                    "max_steps": 0,
+                    "min_steps": 0,
+                    "goals_achieved": 0,
+                    "goal_achievement_rate": 0,
+                    "total_calories": 0,
+                    "total_distance": 0,
+                    "total_active_minutes": 0
+                }
+            
+    except Exception as e:
+        print(f"Error getting step stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
