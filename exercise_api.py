@@ -4,11 +4,10 @@ Exercise logging and tracking API endpoints
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from datetime import datetime, date, timedelta
 from database import SessionLocal, User
-from sqlalchemy import select, and_, func, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text
 import uuid
 import traceback
 
@@ -354,6 +353,317 @@ async def delete_exercise_log(exercise_id: str, user_id: str):
         raise
     except Exception as e:
         print(f"❌ Error deleting exercise log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@exercise_router.get("/history/{user_id}")
+async def get_exercise_history(
+    user_id: str,
+    date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 20
+):
+    """
+    Get exercise history for a user with optional date filtering
+    """
+    try:
+        print(f"📍 Getting exercise history for user {user_id}, date: {date}")
+        
+        async with SessionLocal() as session:
+            # First ensure the table exists
+            await session.execute(text("""
+                CREATE TABLE IF NOT EXISTS exercise_logs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL,
+                    exercise_name VARCHAR(100) NOT NULL,
+                    exercise_type VARCHAR(50) NOT NULL,
+                    duration_minutes INTEGER NOT NULL,
+                    calories_burned FLOAT,
+                    distance_km FLOAT,
+                    sets INTEGER,
+                    reps INTEGER,
+                    weight_kg FLOAT,
+                    intensity VARCHAR(20) DEFAULT 'moderate',
+                    notes VARCHAR(500),
+                    exercise_date TIMESTAMP WITH TIME ZONE NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            await session.commit()
+            
+            # Build the query
+            query = text("""
+                SELECT * FROM exercise_logs 
+                WHERE user_id = :user_id
+            """)
+            
+            params = {"user_id": user_id}
+            
+            # Handle date filtering
+            if date:
+                # If a specific date is provided, get exercises for that day
+                target_date = datetime.fromisoformat(date.replace('Z', '+00:00')).date()
+                start_of_day = datetime.combine(target_date, datetime.min.time())
+                end_of_day = start_of_day + timedelta(days=1)
+                
+                query = text("""
+                    SELECT * FROM exercise_logs 
+                    WHERE user_id = :user_id 
+                    AND exercise_date >= :start_date 
+                    AND exercise_date < :end_date
+                    ORDER BY exercise_date DESC
+                    LIMIT :limit
+                """)
+                params.update({
+                    "start_date": start_of_day,
+                    "end_date": end_of_day,
+                    "limit": limit
+                })
+            elif start_date and end_date:
+                # Date range filtering
+                start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                
+                query = text("""
+                    SELECT * FROM exercise_logs 
+                    WHERE user_id = :user_id 
+                    AND exercise_date >= :start_date 
+                    AND exercise_date <= :end_date
+                    ORDER BY exercise_date DESC
+                    LIMIT :limit
+                """)
+                params.update({
+                    "start_date": start,
+                    "end_date": end,
+                    "limit": limit
+                })
+            else:
+                # No date filter, get recent exercises
+                query = text("""
+                    SELECT * FROM exercise_logs 
+                    WHERE user_id = :user_id 
+                    ORDER BY exercise_date DESC
+                    LIMIT :limit
+                """)
+                params["limit"] = limit
+            
+            result = await session.execute(query, params)
+            logs = result.fetchall()
+            
+            # Convert to dictionary format
+            exercise_logs = []
+            for log in logs:
+                exercise_logs.append({
+                    "id": str(log.id),
+                    "exercise_name": log.exercise_name,
+                    "exercise_type": log.exercise_type,
+                    "duration_minutes": log.duration_minutes,
+                    "calories_burned": float(log.calories_burned) if log.calories_burned else 0,
+                    "distance_km": float(log.distance_km) if log.distance_km else None,
+                    "sets": log.sets,
+                    "reps": log.reps,
+                    "weight_kg": float(log.weight_kg) if log.weight_kg else None,
+                    "intensity": log.intensity,
+                    "notes": log.notes,
+                    "exercise_date": log.exercise_date.isoformat() if log.exercise_date else None,
+                    "created_at": log.created_at.isoformat() if log.created_at else None
+                })
+            
+            print(f"✅ Found {len(exercise_logs)} exercises")
+            
+            return {
+                "success": True,
+                "exercises": exercise_logs,
+                "count": len(exercise_logs)
+            }
+            
+    except Exception as e:
+        print(f"❌ Error fetching exercise history: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@exercise_router.delete("/{exercise_id}")
+async def delete_exercise(exercise_id: str):
+    """
+    Delete an exercise log entry
+    """
+    try:
+        async with SessionLocal() as session:
+            result = await session.execute(
+                text("DELETE FROM exercise_logs WHERE id = :id"),
+                {"id": exercise_id}
+            )
+            await session.commit()
+            
+            if result.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Exercise not found")
+            
+            return {"success": True, "message": "Exercise deleted successfully"}
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting exercise: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@exercise_router.put("/{exercise_id}")
+async def update_exercise(exercise_id: str, request: ExerciseUpdateRequest):
+    """
+    Update an existing exercise log entry
+    """
+    try:
+        async with SessionLocal() as session:
+            # Build dynamic update query based on provided fields
+            update_fields = []
+            params = {"id": exercise_id}
+            
+            if request.duration_minutes is not None:
+                update_fields.append("duration_minutes = :duration_minutes")
+                params["duration_minutes"] = request.duration_minutes
+            
+            if request.calories_burned is not None:
+                update_fields.append("calories_burned = :calories_burned")
+                params["calories_burned"] = request.calories_burned
+            
+            if request.distance_km is not None:
+                update_fields.append("distance_km = :distance_km")
+                params["distance_km"] = request.distance_km
+            
+            if request.intensity is not None:
+                update_fields.append("intensity = :intensity")
+                params["intensity"] = request.intensity
+            
+            if request.notes is not None:
+                update_fields.append("notes = :notes")
+                params["notes"] = request.notes
+            
+            if request.sets is not None:
+                update_fields.append("sets = :sets")
+                params["sets"] = request.sets
+            
+            if request.reps is not None:
+                update_fields.append("reps = :reps")
+                params["reps"] = request.reps
+            
+            if request.weight_kg is not None:
+                update_fields.append("weight_kg = :weight_kg")
+                params["weight_kg"] = request.weight_kg
+            
+            if not update_fields:
+                raise HTTPException(status_code=400, detail="No fields to update")
+            
+            query = text(f"""
+                UPDATE exercise_logs 
+                SET {', '.join(update_fields)}
+                WHERE id = :id
+                RETURNING *
+            """)
+            
+            result = await session.execute(query, params)
+            updated_exercise = result.fetchone()
+            await session.commit()
+            
+            if not updated_exercise:
+                raise HTTPException(status_code=404, detail="Exercise not found")
+            
+            return {
+                "success": True,
+                "message": "Exercise updated successfully",
+                "exercise": {
+                    "id": str(updated_exercise.id),
+                    "exercise_name": updated_exercise.exercise_name,
+                    "duration_minutes": updated_exercise.duration_minutes,
+                    "calories_burned": float(updated_exercise.calories_burned) if updated_exercise.calories_burned else None,
+                    "intensity": updated_exercise.intensity
+                }
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating exercise: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@exercise_router.get("/weekly-summary/{user_id}")
+async def get_weekly_summary(user_id: str):
+    """
+    Get weekly exercise summary for the user
+    """
+    try:
+        async with SessionLocal() as session:
+            # Get exercises from the last 7 days
+            seven_days_ago = datetime.now() - timedelta(days=7)
+            
+            result = await session.execute(text("""
+                SELECT 
+                    COUNT(*) as total_workouts,
+                    SUM(duration_minutes) as total_minutes,
+                    SUM(calories_burned) as total_calories,
+                    AVG(duration_minutes) as avg_duration,
+                    DATE(exercise_date) as workout_date
+                FROM exercise_logs
+                WHERE user_id = :user_id 
+                AND exercise_date >= :start_date
+                GROUP BY DATE(exercise_date)
+                ORDER BY workout_date DESC
+            """), {
+                "user_id": user_id,
+                "start_date": seven_days_ago
+            })
+            
+            daily_summaries = result.fetchall()
+            
+            # Get exercise type distribution
+            type_result = await session.execute(text("""
+                SELECT 
+                    exercise_type,
+                    COUNT(*) as count,
+                    SUM(duration_minutes) as total_minutes
+                FROM exercise_logs
+                WHERE user_id = :user_id 
+                AND exercise_date >= :start_date
+                GROUP BY exercise_type
+            """), {
+                "user_id": user_id,
+                "start_date": seven_days_ago
+            })
+            
+            type_distribution = type_result.fetchall()
+            
+            # Calculate totals
+            total_workouts = sum(day.total_workouts for day in daily_summaries)
+            total_minutes = sum(day.total_minutes or 0 for day in daily_summaries)
+            total_calories = sum(day.total_calories or 0 for day in daily_summaries)
+            
+            return {
+                "success": True,
+                "summary": {
+                    "total_workouts": total_workouts,
+                    "total_minutes": total_minutes,
+                    "total_calories": float(total_calories) if total_calories else 0,
+                    "average_duration": float(total_minutes / total_workouts) if total_workouts > 0 else 0,
+                    "daily_breakdown": [
+                        {
+                            "date": day.workout_date.isoformat(),
+                            "workouts": day.total_workouts,
+                            "minutes": day.total_minutes,
+                            "calories": float(day.total_calories) if day.total_calories else 0
+                        }
+                        for day in daily_summaries
+                    ],
+                    "exercise_types": [
+                        {
+                            "type": type_data.exercise_type,
+                            "count": type_data.count,
+                            "total_minutes": type_data.total_minutes
+                        }
+                        for type_data in type_distribution
+                    ]
+                }
+            }
+            
+    except Exception as e:
+        print(f"❌ Error getting weekly summary: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 def calculate_streak(dates: List[date]) -> int:

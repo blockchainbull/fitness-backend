@@ -10,7 +10,7 @@ import json
 import os
 from openai import OpenAI
 from database import SessionLocal, MealEntry, DailyNutrition, get_user_by_id
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, text
 import uuid
 import traceback
 
@@ -431,73 +431,96 @@ async def delete_meal(meal_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @meal_router.get("/daily-summary/{user_id}")
-async def get_daily_summary(user_id: str, date: Optional[str] = None):
+async def get_daily_summary(
+    user_id: str,
+    date: Optional[str] = None
+):
     """
-    Get daily nutrition summary for a user
+    Get daily nutrition summary including meal counts and exercise data
     """
     try:
+        # Use provided date or today
         if date:
             target_date = datetime.fromisoformat(date.replace('Z', '+00:00')).date()
         else:
             target_date = datetime.now().date()
         
-        print(f"📍 Getting daily summary for user {user_id} on {target_date}")
+        print(f"📊 Getting daily summary for user {user_id} on {target_date}")
         
         async with SessionLocal() as session:
-            # Get all meals for the day
+            # Get meal data for the day
             start_of_day = datetime.combine(target_date, datetime.min.time())
             end_of_day = start_of_day + timedelta(days=1)
             
-            result = await session.execute(
-                select(MealEntry).where(
-                    and_(
-                        MealEntry.user_id == uuid.UUID(user_id),
-                        MealEntry.meal_date >= start_of_day,
-                        MealEntry.meal_date < end_of_day
-                    )
-                )
-            )
-            meals = result.scalars().all()
+            # Count meals by type
+            meal_result = await session.execute(text("""
+                SELECT 
+                    COUNT(*) as total_meals,
+                    SUM(calories) as total_calories,
+                    SUM(protein_g) as total_protein,
+                    SUM(carbs_g) as total_carbs,
+                    SUM(fat_g) as total_fat,
+                    COUNT(CASE WHEN meal_type = 'breakfast' THEN 1 END) as breakfast_count,
+                    COUNT(CASE WHEN meal_type = 'lunch' THEN 1 END) as lunch_count,
+                    COUNT(CASE WHEN meal_type = 'dinner' THEN 1 END) as dinner_count,
+                    COUNT(CASE WHEN meal_type = 'snack' THEN 1 END) as snack_count
+                FROM meal_entries
+                WHERE user_id = :user_id 
+                AND meal_date >= :start_date 
+                AND meal_date < :end_date
+            """), {
+                "user_id": user_id,
+                "start_date": start_of_day,
+                "end_date": end_of_day
+            })
             
-            # Calculate totals
-            totals = {
-                'calories': sum(meal.calories for meal in meals),
-                'protein_g': sum(meal.protein_g for meal in meals),
-                'carbs_g': sum(meal.carbs_g for meal in meals),
-                'fat_g': sum(meal.fat_g for meal in meals),
-                'fiber_g': sum(meal.fiber_g for meal in meals),
-                'meals_count': len(meals)
-            }
+            meal_data = meal_result.fetchone()
             
-            # Get user's goals
-            user = await get_user_by_id(user_id)
-            goals = {
-                'calories': float(user.tdee) if user and user.tdee else 2000,
-                'protein_g': (float(user.weight) * 1.6) if user and user.weight else 60,
-                'carbs_g': 250,
-                'fat_g': 65
-            }
+            # Get exercise data for the day
+            exercise_result = await session.execute(text("""
+                SELECT 
+                    COUNT(*) as total_exercises,
+                    SUM(duration_minutes) as total_minutes,
+                    SUM(calories_burned) as calories_burned
+                FROM exercise_logs
+                WHERE user_id = :user_id 
+                AND exercise_date >= :start_date 
+                AND exercise_date < :end_date
+            """), {
+                "user_id": user_id,
+                "start_date": start_of_day,
+                "end_date": end_of_day
+            })
             
-            print(f"✅ Daily summary: {totals['meals_count']} meals, {totals['calories']} calories")
+            exercise_data = exercise_result.fetchone()
             
+            # Build response
             return {
-                'success': True,
-                'date': target_date.isoformat(),
-                'totals': totals,
-                'goals': goals,
-                'meals': [
-                    {
-                        'id': str(meal.id),
-                        'meal_type': meal.meal_type,
-                        'food_item': meal.food_item,
-                        'calories': meal.calories,
-                        'quantity': meal.quantity
-                    }
-                    for meal in meals
-                ]
+                "success": True,
+                "date": target_date.isoformat(),
+                "meals": {
+                    "total_count": meal_data.total_meals or 0,
+                    "breakfast": meal_data.breakfast_count or 0,
+                    "lunch": meal_data.lunch_count or 0,
+                    "dinner": meal_data.dinner_count or 0,
+                    "snacks": meal_data.snack_count or 0,
+                    "calories_consumed": float(meal_data.total_calories or 0),
+                    "protein_g": float(meal_data.total_protein or 0),
+                    "carbs_g": float(meal_data.total_carbs or 0),
+                    "fat_g": float(meal_data.total_fat or 0)
+                },
+                "exercise": {
+                    "total_count": exercise_data.total_exercises or 0,
+                    "total_minutes": exercise_data.total_minutes or 0,
+                    "calories_burned": float(exercise_data.calories_burned or 0)
+                }
             }
             
     except Exception as e:
         print(f"❌ Error getting daily summary: {e}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "success": False,
+            "meals": {"total_count": 0},
+            "exercise": {"total_count": 0, "total_minutes": 0}
+        }
